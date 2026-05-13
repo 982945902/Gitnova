@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gitnova Dashboard</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="toolbar">
+        <h1>Gitnova</h1>
+        <form id="search-form">
+          <input id="query" name="query" type="search" value="architecture" />
+          <button type="submit">Search</button>
+        </form>
+      </section>
+      <section class="grid">
+        <div>
+          <h2>Summary</h2>
+          <pre id="summary"></pre>
+          <h2>Hubs</h2>
+          <ul id="hubs"></ul>
+        </div>
+        <div>
+          <h2>Ranked Results</h2>
+          <ol id="results"></ol>
+          <h2>Node Detail</h2>
+          <pre id="detail"></pre>
+        </div>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
+
