@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
+use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings};
 use gitnova_storage::{FileManifestEntry, GitnovaStore};
 use notify::{RecursiveMode, Watcher};
@@ -212,6 +213,7 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let files = scan_repository(repo)?;
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
+    apply_lsp_metadata(&mut graph);
     let mut store = GitnovaStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
@@ -245,6 +247,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
         .count();
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
+    apply_lsp_metadata(&mut graph);
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
     save_manifest_from_files(&mut store, files)?;

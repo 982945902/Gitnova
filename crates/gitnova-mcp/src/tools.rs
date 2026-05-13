@@ -2,10 +2,13 @@ use anyhow::Result;
 use gitnova_core::{build_graph_from_entries, query, scan_repository};
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
+use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings};
 use gitnova_storage::{FileManifestEntry, GitnovaStore};
+use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
 
 pub fn list_tools() -> Value {
     json!({
@@ -89,11 +92,15 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
             json!(query::architecture_map(&graph, focus))
         }
-        "watch_project" => json!({
-            "status": "available",
-            "repo": repo_state,
-            "message": "watch mode is provided by the gitnova watch CLI command"
-        }),
+        "watch_project" => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| repo_state.clone());
+            *repo_state = path.clone();
+            start_watch_project(path)?
+        }
         "diff_context" => {
             let base = arguments
                 .get("base")
@@ -128,10 +135,39 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
     }))
 }
 
+fn start_watch_project(repo: PathBuf) -> Result<Value> {
+    if !repo.exists() {
+        anyhow::bail!("repo does not exist: {}", repo.display());
+    }
+    let watched = repo.clone();
+    std::thread::spawn(move || {
+        let (tx, rx) = channel();
+        let Ok(mut watcher) = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }) else {
+            return;
+        };
+        if watcher.watch(&watched, RecursiveMode::Recursive).is_err() {
+            return;
+        }
+        let _ = index_repo(&watched);
+        for event in rx {
+            if event.is_ok() {
+                let _ = index_repo(&watched);
+            }
+        }
+    });
+    Ok(json!({
+        "status": "started",
+        "repo": repo
+    }))
+}
+
 fn index_repo(repo: &Path) -> Result<Value> {
     let files = scan_repository(repo)?;
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
+    apply_lsp_metadata(&mut graph);
     let mut store = GitnovaStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;

@@ -314,7 +314,9 @@ mod tests {
         store.save_graph(&graph).unwrap();
         store.export_json(&graph).unwrap();
         let loaded = store.load_graph().unwrap();
+        let imported = crate::json_export::import_graph(store.json_path()).unwrap();
         assert_eq!(loaded.nodes, graph.nodes);
+        assert_eq!(imported.nodes, graph.nodes);
         assert!(temp.path().join(".gitnova/index.json").exists());
     }
 }

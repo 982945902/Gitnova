@@ -75,6 +75,44 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
             10_000,
         );
 
+        let module_name = module_name_for(&file.relative_path);
+        let module_id = stable_id("module", &file.relative_path, &module_name, None);
+        graph.nodes.push(Node {
+            id: module_id.clone(),
+            kind: NodeKind::Module,
+            name: module_name
+                .split("::")
+                .last()
+                .unwrap_or(&module_name)
+                .to_string(),
+            qualified_name: module_name,
+            path: file.relative_path.clone(),
+            span: None,
+            language: Some(file.language),
+            text: String::new(),
+            tags: vec!["module".into(), file.language.as_str().to_string()],
+            metrics: NodeMetrics {
+                is_test: is_test_path(&file.relative_path),
+                ..NodeMetrics::default()
+            },
+        });
+        add_edge(
+            &mut graph.edges,
+            &mut edge_set,
+            &file_id,
+            &module_id,
+            EdgeKind::Defines,
+            9_000,
+        );
+        add_edge(
+            &mut graph.edges,
+            &mut edge_set,
+            &file_id,
+            &module_id,
+            EdgeKind::Contains,
+            9_000,
+        );
+
         let parsed = parse_source_file(file)?;
         let extraction = extract_file(&parsed);
         for import in extraction.imports {
@@ -186,6 +224,13 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
 
     recompute_degrees(&mut graph);
     Ok(graph)
+}
+
+fn module_name_for(path: &str) -> String {
+    path.rsplit_once('.')
+        .map(|(without_ext, _)| without_ext)
+        .unwrap_or(path)
+        .replace('/', "::")
 }
 
 fn push_symbol_node(graph: &mut CodeGraph, file: &SourceFile, symbol: &ExtractedSymbol) -> NodeId {
@@ -327,5 +372,6 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.kind == EdgeKind::References));
+        assert!(graph.nodes.iter().any(|node| node.kind == NodeKind::Module));
     }
 }

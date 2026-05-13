@@ -125,6 +125,7 @@ fn score_node(
     let kind_bias = match node.kind {
         NodeKind::Function | NodeKind::Method => 0.08,
         NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface => 0.05,
+        NodeKind::Module => -0.15,
         NodeKind::File => -0.02,
         _ => 0.0,
     };

@@ -604,6 +604,7 @@ dependencies = [
  "gitnova-enrich",
  "gitnova-rank",
  "gitnova-storage",
+ "notify",
  "schemars",
  "serde",
  "serde_json",

@@ -11,8 +11,8 @@ gitnova-dashboard = { path = "../gitnova-dashboard" }
 gitnova-enrich = { path = "../gitnova-enrich" }
 gitnova-rank = { path = "../gitnova-rank" }
 gitnova-storage = { path = "../gitnova-storage" }
+notify.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-

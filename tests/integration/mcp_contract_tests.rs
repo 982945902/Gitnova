@@ -46,12 +46,20 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
             "resources/read",
             json!({"uri":"gitnova://graph/summary"}),
         ),
+        rpc(
+            6,
+            "tools/call",
+            json!({
+                "name":"watch_project",
+                "arguments":{"path": fixture("rust_sample")}
+            }),
+        ),
     ] {
         writeln!(stdin, "{line}").unwrap();
     }
 
     let mut responses = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         responses.push(serde_json::from_str::<Value>(&line).unwrap());
@@ -73,4 +81,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     assert!(serde_json::to_string(&responses[4])
         .unwrap()
         .contains("\"nodes\""));
+    assert!(serde_json::to_string(&responses[5])
+        .unwrap()
+        .contains("started"));
 }

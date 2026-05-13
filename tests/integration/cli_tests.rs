@@ -184,3 +184,53 @@ fn cli_exposes_core_workflows_and_embeddings() {
             .success();
     }
 }
+
+#[test]
+fn incremental_update_reports_skips_changes_and_deletes() {
+    let (_temp, repo) = temp_fixture("rust_sample");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let unchanged = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["update", "--repo", repo.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let unchanged: Value = serde_json::from_slice(&unchanged).unwrap();
+    assert!(unchanged["skipped"].as_u64().unwrap() >= 4);
+    assert_eq!(unchanged["changed"].as_u64().unwrap(), 0);
+
+    fs::write(
+        repo.join("src/extra.rs"),
+        "pub fn new_domain_entrypoint() -> bool { true }\n",
+    )
+    .unwrap();
+    let changed = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["update", "--repo", repo.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let changed: Value = serde_json::from_slice(&changed).unwrap();
+    assert!(changed["changed"].as_u64().unwrap() >= 1);
+
+    fs::remove_file(repo.join("src/extra.rs")).unwrap();
+    let deleted = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["update", "--repo", repo.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let deleted: Value = serde_json::from_slice(&deleted).unwrap();
+    assert!(deleted["deleted"].as_u64().unwrap() >= 1);
+}
