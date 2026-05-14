@@ -5,12 +5,17 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn serve_stdio() -> Result<()> {
+    let repo_state = std::env::var("GITNOVA_REPO")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    if std::env::var("GITNOVA_USE_RMCP").as_deref() == Ok("1") {
+        return crate::rmcp_server::serve_stdio(repo_state).await;
+    }
+
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
-    let mut repo_state = std::env::var("GITNOVA_REPO")
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
+    let mut repo_state = repo_state;
 
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {

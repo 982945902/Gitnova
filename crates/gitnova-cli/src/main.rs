@@ -185,16 +185,13 @@ async fn main() -> Result<()> {
         }
         Commands::Embeddings(args) => match args.command {
             EmbeddingCommands::Build(build) => {
-                if build.provider != LOCAL_HASH_PROVIDER {
-                    anyhow::bail!("unsupported embedding provider: {}", build.provider);
-                }
                 let graph = GitnovaStore::open(&build.repo)?.load_graph()?;
-                let embeddings = embeddings::build_local_hash_embeddings(&graph);
+                let embeddings = embeddings::build_embeddings(&graph, &build.provider)?;
                 let count = embeddings.len();
                 GitnovaStore::open(&build.repo)?.save_embeddings(&embeddings)?;
                 print_json(&json!({
                     "status": "built",
-                    "provider": LOCAL_HASH_PROVIDER,
+                    "provider": build.provider,
                     "count": count
                 }))?;
             }

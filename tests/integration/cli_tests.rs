@@ -174,7 +174,7 @@ fn cli_exposes_core_workflows_and_embeddings() {
             "--repo",
             repo.to_str().unwrap(),
             "--provider",
-            "local-hash",
+            "local-semantic",
         ],
     ] {
         Command::cargo_bin("gitnova")

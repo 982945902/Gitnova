@@ -7,8 +7,42 @@ use gitnova_rank::{diff, rank_graph_with_embeddings};
 use gitnova_storage::{FileManifestEntry, GitnovaStore};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+static WATCHERS: OnceLock<Mutex<HashMap<String, WatchRecord>>> = OnceLock::new();
+static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+
+struct WatchRecord {
+    repo: PathBuf,
+    stop: Arc<AtomicBool>,
+    status: WatchState,
+    events_seen: u64,
+    last_indexed_unix: Option<u64>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchState {
+    Running,
+    Stopped,
+    Failed,
+}
+
+impl WatchState {
+    fn as_str(self) -> &'static str {
+        match self {
+            WatchState::Running => "running",
+            WatchState::Stopped => "stopped",
+            WatchState::Failed => "failed",
+        }
+    }
+}
 
 pub fn list_tools() -> Value {
     json!({
@@ -19,8 +53,10 @@ pub fn list_tools() -> Value {
             tool("impact_analysis", "Find reverse dependencies for a symbol"),
             tool("architecture_map", "Summarize repository architecture"),
             tool("watch_project", "Report watch mode availability for a repository"),
+            tool("watch_status", "Report a managed watcher's current state"),
+            tool("stop_watch", "Stop a managed watcher by watch_id"),
             tool("diff_context", "Rank context from git diff paths"),
-            tool("search_embeddings", "Search local-hash embeddings")
+            tool("search_embeddings", "Search persisted embeddings by provider")
         ]
     })
 }
@@ -101,6 +137,20 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             *repo_state = path.clone();
             start_watch_project(path)?
         }
+        "watch_status" => {
+            let watch_id = arguments
+                .get("watch_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            watch_status(watch_id)
+        }
+        "stop_watch" => {
+            let watch_id = arguments
+                .get("watch_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            stop_watch_project(watch_id)
+        }
         "diff_context" => {
             let base = arguments
                 .get("base")
@@ -118,12 +168,15 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
         "search_embeddings" => {
             let query_text = arguments.get("query").and_then(Value::as_str).unwrap_or("");
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+            let provider = arguments
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or(LOCAL_HASH_PROVIDER);
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let vectors =
-                GitnovaStore::open(repo_state.as_path())?.load_embeddings(LOCAL_HASH_PROVIDER)?;
-            json!(embeddings::search_embeddings(
-                &graph, &vectors, query_text, limit
-            ))
+            let vectors = GitnovaStore::open(repo_state.as_path())?.load_embeddings(provider)?;
+            json!(embeddings::search_embeddings_with_provider(
+                &graph, &vectors, query_text, provider, limit
+            )?)
         }
         other => json!({ "error": format!("unknown tool {other}") }),
     };
@@ -139,28 +192,134 @@ fn start_watch_project(repo: PathBuf) -> Result<Value> {
     if !repo.exists() {
         anyhow::bail!("repo does not exist: {}", repo.display());
     }
+    let watch_id = format!(
+        "watch-{}-{}",
+        gitnova_core::model::current_unix(),
+        NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    watchers().lock().unwrap().insert(
+        watch_id.clone(),
+        WatchRecord {
+            repo: repo.clone(),
+            stop: stop.clone(),
+            status: WatchState::Running,
+            events_seen: 0,
+            last_indexed_unix: None,
+            handle: None,
+        },
+    );
     let watched = repo.clone();
-    std::thread::spawn(move || {
+    let thread_watch_id = watch_id.clone();
+    let handle = std::thread::spawn(move || {
         let (tx, rx) = channel();
         let Ok(mut watcher) = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         }) else {
+            update_watch_state(&thread_watch_id, WatchState::Failed, None, None);
             return;
         };
         if watcher.watch(&watched, RecursiveMode::Recursive).is_err() {
+            update_watch_state(&thread_watch_id, WatchState::Failed, None, None);
             return;
         }
-        let _ = index_repo(&watched);
-        for event in rx {
-            if event.is_ok() {
-                let _ = index_repo(&watched);
+        if index_repo(&watched).is_ok() {
+            update_watch_state(
+                &thread_watch_id,
+                WatchState::Running,
+                None,
+                Some(gitnova_core::model::current_unix()),
+            );
+        }
+        while !stop.load(Ordering::Relaxed) {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(Ok(event)) => {
+                    if event
+                        .paths
+                        .iter()
+                        .all(|path| path.components().any(|part| part.as_os_str() == ".gitnova"))
+                    {
+                        continue;
+                    }
+                    if index_repo(&watched).is_ok() {
+                        update_watch_state(
+                            &thread_watch_id,
+                            WatchState::Running,
+                            Some(1),
+                            Some(gitnova_core::model::current_unix()),
+                        );
+                    }
+                }
+                Ok(Err(_)) => update_watch_state(&thread_watch_id, WatchState::Failed, None, None),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
+        update_watch_state(&thread_watch_id, WatchState::Stopped, None, None);
     });
+    if let Some(record) = watchers().lock().unwrap().get_mut(&watch_id) {
+        record.handle = Some(handle);
+    }
     Ok(json!({
         "status": "started",
+        "watch_id": watch_id,
         "repo": repo
     }))
+}
+
+fn watch_status(watch_id: &str) -> Value {
+    let watchers = watchers().lock().unwrap();
+    let Some(record) = watchers.get(watch_id) else {
+        return json!({
+            "status": "unknown",
+            "watch_id": watch_id
+        });
+    };
+    json!({
+        "status": record.status.as_str(),
+        "watch_id": watch_id,
+        "repo": record.repo.to_string_lossy().to_string(),
+        "events_seen": record.events_seen,
+        "last_indexed_unix": record.last_indexed_unix
+    })
+}
+
+fn stop_watch_project(watch_id: &str) -> Value {
+    let mut watchers = watchers().lock().unwrap();
+    let Some(record) = watchers.get_mut(watch_id) else {
+        return json!({
+            "status": "unknown",
+            "watch_id": watch_id
+        });
+    };
+    record.stop.store(true, Ordering::Relaxed);
+    record.status = WatchState::Stopped;
+    json!({
+        "status": "stopped",
+        "watch_id": watch_id,
+        "repo": record.repo.to_string_lossy().to_string()
+    })
+}
+
+fn watchers() -> &'static Mutex<HashMap<String, WatchRecord>> {
+    WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn update_watch_state(
+    watch_id: &str,
+    status: WatchState,
+    events_delta: Option<u64>,
+    last_indexed_unix: Option<u64>,
+) {
+    if let Some(record) = watchers().lock().unwrap().get_mut(watch_id) {
+        record.status = status;
+        if let Some(delta) = events_delta {
+            record.events_seen += delta;
+        }
+        if last_indexed_unix.is_some() {
+            record.last_indexed_unix = last_indexed_unix;
+        }
+    }
 }
 
 fn index_repo(repo: &Path) -> Result<Value> {
@@ -186,4 +345,26 @@ fn index_repo(repo: &Path) -> Result<Value> {
         "status": "indexed",
         "summary": query::summarize(&graph)
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_watchers_report_status_and_stop() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn entry() {}\n").unwrap();
+
+        let started = start_watch_project(temp.path().to_path_buf()).unwrap();
+        let watch_id = started["watch_id"].as_str().expect("watch id");
+        let status = watch_status(watch_id);
+        assert_eq!(status["status"], "running");
+        assert_eq!(status["repo"], temp.path().to_string_lossy().to_string());
+
+        let stopped = stop_watch_project(watch_id);
+        assert_eq!(stopped["status"], "stopped");
+        let status = watch_status(watch_id);
+        assert_eq!(status["status"], "stopped");
+    }
 }

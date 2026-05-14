@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub const LOCAL_HASH_PROVIDER: &str = "local-hash";
+pub const LOCAL_SEMANTIC_PROVIDER: &str = "local-semantic";
 const DIMENSIONS: usize = 64;
+const SEMANTIC_DIMENSIONS: usize = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingSearchResult {
@@ -17,17 +19,34 @@ pub struct EmbeddingSearchResult {
 }
 
 pub fn build_local_hash_embeddings(graph: &CodeGraph) -> Vec<StoredEmbedding> {
+    build_embeddings_for_provider(graph, LOCAL_HASH_PROVIDER)
+}
+
+pub fn build_embeddings(graph: &CodeGraph, provider: &str) -> anyhow::Result<Vec<StoredEmbedding>> {
+    match provider {
+        LOCAL_HASH_PROVIDER | LOCAL_SEMANTIC_PROVIDER => {
+            Ok(build_embeddings_for_provider(graph, provider))
+        }
+        other => anyhow::bail!("unsupported embedding provider: {other}"),
+    }
+}
+
+fn build_embeddings_for_provider(graph: &CodeGraph, provider: &str) -> Vec<StoredEmbedding> {
     graph
         .nodes
         .iter()
         .filter(|node| !matches!(node.kind, NodeKind::Repository | NodeKind::Import))
         .map(|node| StoredEmbedding {
             node_id: node.id.clone(),
-            provider: LOCAL_HASH_PROVIDER.into(),
-            vector: embed_text(&format!(
-                "{} {} {}",
-                node.qualified_name, node.path, node.text
-            )),
+            provider: provider.into(),
+            vector: embed_text_for_provider(
+                provider,
+                &format!(
+                    "{} {} {} {:?}",
+                    node.qualified_name, node.path, node.text, node.kind
+                ),
+            )
+            .unwrap_or_else(|_| embed_text("")),
         })
         .collect()
 }
@@ -37,8 +56,17 @@ pub fn similarity_map(
     vectors: &HashMap<String, Vec<f32>>,
     query: &str,
 ) -> HashMap<String, f64> {
-    let query_vector = embed_text(query);
-    graph
+    similarity_map_for_provider(graph, vectors, query, LOCAL_HASH_PROVIDER).unwrap_or_default()
+}
+
+pub fn similarity_map_for_provider(
+    graph: &CodeGraph,
+    vectors: &HashMap<String, Vec<f32>>,
+    query: &str,
+    provider: &str,
+) -> anyhow::Result<HashMap<String, f64>> {
+    let query_vector = embed_text_for_provider(provider, query)?;
+    Ok(graph
         .nodes
         .iter()
         .filter_map(|node| {
@@ -46,7 +74,18 @@ pub fn similarity_map(
                 .get(&node.id)
                 .map(|vector| (node.id.clone(), cosine(&query_vector, vector)))
         })
-        .collect()
+        .collect())
+}
+
+pub fn search_embeddings_with_provider(
+    graph: &CodeGraph,
+    vectors: &HashMap<String, Vec<f32>>,
+    query: &str,
+    provider: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<EmbeddingSearchResult>> {
+    let scores = similarity_map_for_provider(graph, vectors, query, provider)?;
+    Ok(search_from_scores(graph, &scores, limit))
 }
 
 pub fn search_embeddings(
@@ -55,7 +94,24 @@ pub fn search_embeddings(
     query: &str,
     limit: usize,
 ) -> Vec<EmbeddingSearchResult> {
-    let scores = similarity_map(graph, vectors, query);
+    let query_vector = embed_text(query);
+    let scores = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            vectors
+                .get(&node.id)
+                .map(|vector| (node.id.clone(), cosine(&query_vector, vector)))
+        })
+        .collect::<HashMap<_, _>>();
+    search_from_scores(graph, &scores, limit)
+}
+
+fn search_from_scores(
+    graph: &CodeGraph,
+    scores: &HashMap<String, f64>,
+    limit: usize,
+) -> Vec<EmbeddingSearchResult> {
     let mut results = graph
         .nodes
         .iter()
@@ -77,6 +133,14 @@ pub fn search_embeddings(
     results
 }
 
+pub fn embed_text_for_provider(provider: &str, text: &str) -> anyhow::Result<Vec<f32>> {
+    match provider {
+        LOCAL_HASH_PROVIDER => Ok(embed_text(text)),
+        LOCAL_SEMANTIC_PROVIDER => Ok(embed_semantic_text(text)),
+        other => anyhow::bail!("unsupported embedding provider: {other}"),
+    }
+}
+
 pub fn embed_text(text: &str) -> Vec<f32> {
     let mut vector = vec![0.0f32; DIMENSIONS];
     for token in tokenize(text) {
@@ -86,6 +150,112 @@ pub fn embed_text(text: &str) -> Vec<f32> {
         vector[index] += sign;
     }
     normalize(vector)
+}
+
+fn embed_semantic_text(text: &str) -> Vec<f32> {
+    let mut vector = vec![0.0f32; SEMANTIC_DIMENSIONS];
+    for token in tokenize(text) {
+        for (dimension, weight) in semantic_dimensions(&token) {
+            vector[dimension] += weight;
+        }
+        let digest = Sha256::digest(token.as_bytes());
+        let index = 32 + (digest[0] as usize % (SEMANTIC_DIMENSIONS - 32));
+        vector[index] += 0.25;
+    }
+    normalize(vector)
+}
+
+fn semantic_dimensions(token: &str) -> Vec<(usize, f32)> {
+    let mut dims = semantic_direct_dimensions(token);
+    for expanded in semantic_expansions(token) {
+        if *expanded != token {
+            dims.extend(
+                semantic_direct_dimensions(expanded)
+                    .into_iter()
+                    .map(|(dim, weight)| (dim, weight * 0.55)),
+            );
+        }
+    }
+    if dims.is_empty() {
+        let digest = Sha256::digest(token.as_bytes());
+        dims.push((8 + (digest[0] as usize % 24), 0.35));
+    }
+    dims
+}
+
+fn semantic_direct_dimensions(token: &str) -> Vec<(usize, f32)> {
+    let mut dims = Vec::new();
+    if matches!(
+        token,
+        "auth"
+            | "authenticate"
+            | "authentication"
+            | "authorize"
+            | "authorization"
+            | "login"
+            | "signin"
+            | "signon"
+            | "session"
+            | "token"
+            | "credential"
+            | "permission"
+            | "permissions"
+            | "access"
+            | "validate"
+            | "valid"
+            | "user"
+            | "account"
+    ) {
+        dims.push((0, 1.0));
+    }
+    if matches!(token, "session" | "token" | "cookie" | "jwt") {
+        dims.push((1, 0.8));
+    }
+    if matches!(
+        token,
+        "date" | "time" | "format" | "calendar" | "timezone" | "timestamp"
+    ) {
+        dims.push((2, 1.0));
+    }
+    if matches!(token, "report" | "invoice" | "billing" | "render" | "label") {
+        dims.push((3, 1.0));
+    }
+    if matches!(
+        token,
+        "config" | "setting" | "option" | "env" | "environment"
+    ) {
+        dims.push((4, 1.0));
+    }
+    if matches!(
+        token,
+        "db" | "database" | "store" | "storage" | "sqlite" | "cache"
+    ) {
+        dims.push((5, 1.0));
+    }
+    if matches!(
+        token,
+        "http" | "api" | "route" | "request" | "response" | "server"
+    ) {
+        dims.push((6, 1.0));
+    }
+    if matches!(token, "test" | "spec" | "mock" | "fixture") {
+        dims.push((7, 1.0));
+    }
+    dims
+}
+
+fn semantic_expansions(token: &str) -> &'static [&'static str] {
+    match token {
+        "signin" | "login" | "signon" => &["auth", "session", "validate"],
+        "permissions" | "permission" | "access" => &["auth", "authorize", "validate"],
+        "validate" | "valid" | "validation" => &["auth", "session", "token"],
+        "session" => &["auth", "login", "token"],
+        "token" | "jwt" => &["auth", "session", "credential"],
+        "credential" | "credentials" => &["auth", "login"],
+        "format" => &["date", "time"],
+        "invoice" => &["billing", "report"],
+        _ => &[],
+    }
 }
 
 fn normalize(mut vector: Vec<f32>) -> Vec<f32> {
@@ -133,5 +303,39 @@ mod tests {
             .collect();
         let results = search_embeddings(&graph, &vectors, "validate token", 1);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn semantic_embeddings_match_domain_synonyms_without_exact_tokens() {
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("auth.ts"),
+            r#"
+export function validateSession(session: Session) {
+  return Boolean(session.token);
+}
+
+export function formatDate(value: Date) {
+  return value.toISOString();
+}
+"#,
+        )
+        .unwrap();
+        let graph = build_graph(temp.path()).unwrap();
+        let embeddings = build_embeddings(&graph, LOCAL_SEMANTIC_PROVIDER).unwrap();
+        let vectors = embeddings
+            .into_iter()
+            .map(|embedding| (embedding.node_id, embedding.vector))
+            .collect();
+        let results = search_embeddings_with_provider(
+            &graph,
+            &vectors,
+            "signin permissions",
+            LOCAL_SEMANTIC_PROVIDER,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(results[0].qualified_name, "auth.ts::validateSession");
     }
 }

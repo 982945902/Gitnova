@@ -1,9 +1,23 @@
 use super::{fill_symbol_text_and_calls, import_from_line, ExtractedSymbol, FileExtraction};
-use crate::model::NodeKind;
+use crate::model::{Language, NodeKind, Span};
 use crate::parser::{line_span, ParsedFile};
 use regex::Regex;
+use std::collections::HashSet;
+use tree_sitter::{Node, Parser};
 
 pub fn extract(parsed: &ParsedFile) -> FileExtraction {
+    let mut heuristic = extract_heuristic(parsed);
+    let Some(mut syntax_symbols) = extract_syntax_symbols(parsed) else {
+        return heuristic;
+    };
+
+    syntax_symbols.sort_by_key(|symbol| (symbol.span.start_line, symbol.span.start_col));
+    fill_symbol_text_and_calls(&mut syntax_symbols, &parsed.text);
+    heuristic.symbols = merge_symbols(syntax_symbols, heuristic.symbols);
+    heuristic
+}
+
+fn extract_heuristic(parsed: &ParsedFile) -> FileExtraction {
     let path = &parsed.source.relative_path;
     let mut extraction = FileExtraction::default();
     let import_re = Regex::new(r#"^\s*import\s+\{?([^}"']+)\}?\s+from"#).unwrap();
@@ -106,6 +120,145 @@ pub fn extract(parsed: &ParsedFile) -> FileExtraction {
     extraction
 }
 
+fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
+    let mut parser = Parser::new();
+    let language = match parsed.source.language {
+        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        _ => return None,
+    };
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(&parsed.text, None)?;
+    let mut symbols = Vec::new();
+    walk_node(
+        tree.root_node(),
+        parsed.text.as_bytes(),
+        &parsed.source.relative_path,
+        None,
+        &mut symbols,
+    );
+    if symbols.is_empty() {
+        None
+    } else {
+        Some(symbols)
+    }
+}
+
+fn walk_node(
+    node: Node<'_>,
+    source: &[u8],
+    path: &str,
+    current_class: Option<String>,
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    let mut class_for_children = current_class.clone();
+    match node.kind() {
+        "function_declaration" | "generator_function_declaration" => {
+            if let Some(name) = child_name(node, source) {
+                push_syntax_symbol(symbols, NodeKind::Function, path, node, &name, &name);
+            }
+        }
+        "class_declaration" => {
+            if let Some(name) = child_name(node, source) {
+                push_syntax_symbol(symbols, NodeKind::Class, path, node, &name, &name);
+                class_for_children = Some(name);
+            }
+        }
+        "interface_declaration" => {
+            if let Some(name) = child_name(node, source) {
+                push_syntax_symbol(symbols, NodeKind::Interface, path, node, &name, &name);
+            }
+        }
+        "method_definition" | "method_signature" => {
+            if let (Some(parent), Some(name)) = (current_class.as_deref(), child_name(node, source))
+            {
+                let qualified = format!("{parent}::{name}");
+                push_syntax_symbol(symbols, NodeKind::Method, path, node, &name, &qualified);
+            }
+        }
+        "variable_declarator" => {
+            let value_kind = node
+                .child_by_field_name("value")
+                .map(|value| value.kind().to_string())
+                .unwrap_or_default();
+            if matches!(
+                value_kind.as_str(),
+                "arrow_function" | "function_expression" | "generator_function"
+            ) {
+                if let Some(name) = child_name(node, source) {
+                    push_syntax_symbol(symbols, NodeKind::Function, path, node, &name, &name);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            walk_node(child, source, path, class_for_children.clone(), symbols);
+        }
+    }
+}
+
+fn child_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    node.child_by_field_name("name")
+        .and_then(|child| child.utf8_text(source).ok())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn push_syntax_symbol(
+    symbols: &mut Vec<ExtractedSymbol>,
+    kind: NodeKind,
+    path: &str,
+    node: Node<'_>,
+    name: &str,
+    qualified_name: &str,
+) {
+    symbols.push(ExtractedSymbol {
+        kind,
+        name: name.to_string(),
+        qualified_name: qualified_name.to_string(),
+        path: path.to_string(),
+        span: span_from_node(node),
+        text: String::new(),
+        calls: Vec::new(),
+        tags: vec!["tree-sitter".into()],
+    });
+}
+
+fn span_from_node(node: Node<'_>) -> Span {
+    let start = node.start_position();
+    let end = node.end_position();
+    Span {
+        start_line: start.row + 1,
+        start_col: start.column + 1,
+        end_line: end.row + 1,
+        end_col: end.column + 1,
+    }
+}
+
+fn merge_symbols(
+    syntax_symbols: Vec<ExtractedSymbol>,
+    heuristic_symbols: Vec<ExtractedSymbol>,
+) -> Vec<ExtractedSymbol> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for symbol in syntax_symbols.into_iter().chain(heuristic_symbols) {
+        let key = (
+            symbol.kind.clone(),
+            symbol.qualified_name.clone(),
+            symbol.span.start_line,
+        );
+        if seen.insert(key) {
+            merged.push(symbol);
+        }
+    }
+    merged.sort_by_key(|symbol| (symbol.span.start_line, symbol.span.start_col));
+    merged
+}
+
 fn push_symbol(
     symbols: &mut Vec<ExtractedSymbol>,
     kind: NodeKind,
@@ -130,4 +283,51 @@ fn push_symbol(
 fn brace_delta(line: &str) -> isize {
     line.chars().filter(|ch| *ch == '{').count() as isize
         - line.chars().filter(|ch| *ch == '}').count() as isize
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{build_graph, NodeKind};
+    use std::fs;
+
+    #[test]
+    fn extracts_multiline_typescript_symbols_from_syntax_tree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("auth.ts"),
+            r#"
+type Session = { token: string };
+
+function checkToken(token: string): boolean {
+  return token.length > 0;
+}
+
+export async function
+validateSession(session: Session): Promise<boolean> {
+  return checkToken(session.token);
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_graph(temp.path()).unwrap();
+        let validate = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "validateSession")
+            .expect("multiline function declaration should be extracted");
+
+        assert_eq!(validate.kind, NodeKind::Function);
+        assert_eq!(validate.span.unwrap().start_line, 8);
+        assert!(
+            graph.edges.iter().any(|edge| {
+                edge.from == validate.id
+                    && graph
+                        .node(&edge.to)
+                        .map(|node| node.name == "checkToken")
+                        .unwrap_or(false)
+            }),
+            "call edge from validateSession to checkToken should come from AST-backed text span"
+        );
+    }
 }

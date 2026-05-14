@@ -12,7 +12,11 @@ gitnova-enrich = { path = "../gitnova-enrich" }
 gitnova-rank = { path = "../gitnova-rank" }
 gitnova-storage = { path = "../gitnova-storage" }
 notify.workspace = true
+rmcp = { version = "0.15.0", features = ["transport-io"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
