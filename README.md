@@ -3,8 +3,8 @@
 Gitnova is a local-first MCP code intelligence system for Rust, TypeScript,
 JavaScript, and Python repositories. It scans source files with `.gitignore`
 support, parses with tree-sitter, stores a graph in SQLite, ranks context by
-architectural salience, and exposes the graph through a CLI, MCP stdio server,
-and local dashboard.
+architectural salience, and exposes the graph through a CLI, rmcp-backed MCP
+stdio server, and local dashboard.
 
 ## Quick Start
 
@@ -17,8 +17,11 @@ cargo run -p gitnova -- dashboard --repo /path/to/repo --port 4567
 ```
 
 Data is written to `.gitnova/gitnova.db` and `.gitnova/index.json` inside the
-indexed repository. Embeddings and LSP enrichment are best-effort local features;
-core indexing, ranking, storage, CLI, MCP, and dashboard workflows work offline.
+indexed repository. Core indexing, ranking, storage, CLI, MCP, and dashboard
+workflows work offline. LSP probing is opt-in with `GITNOVA_LSP_PROBE=1` and
+uses project config plus timeouts before attempting installed language servers.
+Embedding providers include deterministic local options and a command-backed
+model provider via `GITNOVA_EMBEDDING_COMMAND`.
 
 ## Commands
 
@@ -33,7 +36,8 @@ gitnova impact-analysis "symbol" --repo <path> --limit 20
 gitnova architecture-map --repo <path> --focus auth
 gitnova diff-context --repo <path> [--base main]
 gitnova embeddings build --repo <path> --provider local-hash
+gitnova embeddings build --repo <path> --provider local-semantic
+GITNOVA_EMBEDDING_COMMAND=/path/to/embedder gitnova embeddings build --repo <path> --provider neural-command
 gitnova dashboard --repo <path> --port 4567
 gitnova serve
 ```
-

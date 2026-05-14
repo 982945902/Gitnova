@@ -36,6 +36,7 @@ form {
 }
 
 input,
+select,
 button {
   min-height: 36px;
   border: 1px solid #b7bfcc;
@@ -71,6 +72,17 @@ button {
 #graph-count {
   color: #667085;
   font-size: 13px;
+}
+
+.graph-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 180px) 36px 36px auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.graph-controls button {
+  min-width: 36px;
 }
 
 #graph-canvas {
@@ -112,5 +124,9 @@ li {
 
   #graph-canvas {
     height: 340px;
+  }
+
+  .graph-controls {
+    grid-template-columns: 1fr 1fr;
   }
 }

@@ -126,4 +126,7 @@ fn dashboard_serves_graph_visualization_shell() {
     let html = html.expect("dashboard index should respond");
     assert!(html.contains("graph-canvas"));
     assert!(html.contains("Graph"));
+    assert!(html.contains("graph-filter"));
+    assert!(html.contains("graph-kind"));
+    assert!(html.contains("graph-zoom-in"));
 }

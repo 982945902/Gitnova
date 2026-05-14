@@ -4,9 +4,13 @@ use gitnova_storage::StoredEmbedding;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub const LOCAL_HASH_PROVIDER: &str = "local-hash";
 pub const LOCAL_SEMANTIC_PROVIDER: &str = "local-semantic";
+pub const NEURAL_COMMAND_PROVIDER: &str = "neural-command";
 const DIMENSIONS: usize = 64;
 const SEMANTIC_DIMENSIONS: usize = 96;
 
@@ -23,10 +27,19 @@ pub fn build_local_hash_embeddings(graph: &CodeGraph) -> Vec<StoredEmbedding> {
 }
 
 pub fn build_embeddings(graph: &CodeGraph, provider: &str) -> anyhow::Result<Vec<StoredEmbedding>> {
+    build_embeddings_with_command(graph, provider, neural_command_from_env().as_deref())
+}
+
+pub fn build_embeddings_with_command(
+    graph: &CodeGraph,
+    provider: &str,
+    command: Option<&Path>,
+) -> anyhow::Result<Vec<StoredEmbedding>> {
     match provider {
         LOCAL_HASH_PROVIDER | LOCAL_SEMANTIC_PROVIDER => {
             Ok(build_embeddings_for_provider(graph, provider))
         }
+        NEURAL_COMMAND_PROVIDER => build_neural_command_embeddings(graph, command),
         other => anyhow::bail!("unsupported embedding provider: {other}"),
     }
 }
@@ -65,7 +78,27 @@ pub fn similarity_map_for_provider(
     query: &str,
     provider: &str,
 ) -> anyhow::Result<HashMap<String, f64>> {
-    let query_vector = embed_text_for_provider(provider, query)?;
+    similarity_map_for_provider_with_command(
+        graph,
+        vectors,
+        query,
+        provider,
+        neural_command_from_env().as_deref(),
+    )
+}
+
+pub fn similarity_map_for_provider_with_command(
+    graph: &CodeGraph,
+    vectors: &HashMap<String, Vec<f32>>,
+    query: &str,
+    provider: &str,
+    command: Option<&Path>,
+) -> anyhow::Result<HashMap<String, f64>> {
+    let query_vector = if provider == NEURAL_COMMAND_PROVIDER {
+        embed_text_with_neural_command(query, command)?
+    } else {
+        embed_text_for_provider(provider, query)?
+    };
     Ok(graph
         .nodes
         .iter()
@@ -84,7 +117,26 @@ pub fn search_embeddings_with_provider(
     provider: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<EmbeddingSearchResult>> {
-    let scores = similarity_map_for_provider(graph, vectors, query, provider)?;
+    search_embeddings_with_command(
+        graph,
+        vectors,
+        query,
+        provider,
+        neural_command_from_env().as_deref(),
+        limit,
+    )
+}
+
+pub fn search_embeddings_with_command(
+    graph: &CodeGraph,
+    vectors: &HashMap<String, Vec<f32>>,
+    query: &str,
+    provider: &str,
+    command: Option<&Path>,
+    limit: usize,
+) -> anyhow::Result<Vec<EmbeddingSearchResult>> {
+    let scores =
+        similarity_map_for_provider_with_command(graph, vectors, query, provider, command)?;
     Ok(search_from_scores(graph, &scores, limit))
 }
 
@@ -137,8 +189,71 @@ pub fn embed_text_for_provider(provider: &str, text: &str) -> anyhow::Result<Vec
     match provider {
         LOCAL_HASH_PROVIDER => Ok(embed_text(text)),
         LOCAL_SEMANTIC_PROVIDER => Ok(embed_semantic_text(text)),
+        NEURAL_COMMAND_PROVIDER => {
+            embed_text_with_neural_command(text, neural_command_from_env().as_deref())
+        }
         other => anyhow::bail!("unsupported embedding provider: {other}"),
     }
+}
+
+fn build_neural_command_embeddings(
+    graph: &CodeGraph,
+    command: Option<&Path>,
+) -> anyhow::Result<Vec<StoredEmbedding>> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| !matches!(node.kind, NodeKind::Repository | NodeKind::Import))
+        .map(|node| {
+            let text = format!(
+                "{} {} {} {:?}",
+                node.qualified_name, node.path, node.text, node.kind
+            );
+            Ok(StoredEmbedding {
+                node_id: node.id.clone(),
+                provider: NEURAL_COMMAND_PROVIDER.into(),
+                vector: embed_text_with_neural_command(&text, command)?,
+            })
+        })
+        .collect()
+}
+
+fn embed_text_with_neural_command(text: &str, command: Option<&Path>) -> anyhow::Result<Vec<f32>> {
+    let command = command.ok_or_else(|| {
+        anyhow::anyhow!(
+            "neural-command provider requires GITNOVA_EMBEDDING_COMMAND or an explicit command"
+        )
+    })?;
+    let mut child = Command::new(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(serde_json::json!({ "text": text }).to_string().as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "neural embedding command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    parse_vector_output(&output.stdout)
+}
+
+fn parse_vector_output(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let vector_value = value.get("vector").unwrap_or(&value);
+    let vector = serde_json::from_value::<Vec<f32>>(vector_value.clone())?;
+    if vector.is_empty() {
+        anyhow::bail!("neural embedding command returned an empty vector");
+    }
+    Ok(normalize(vector))
+}
+
+fn neural_command_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("GITNOVA_EMBEDDING_COMMAND").map(std::path::PathBuf::from)
 }
 
 pub fn embed_text(text: &str) -> Vec<f32> {
@@ -332,6 +447,56 @@ export function formatDate(value: Date) {
             &vectors,
             "signin permissions",
             LOCAL_SEMANTIC_PROVIDER,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(results[0].qualified_name, "auth.ts::validateSession");
+    }
+
+    #[test]
+    fn neural_command_provider_uses_external_model_vectors() {
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("embedder.sh"),
+            r#"#!/bin/sh
+input=$(cat)
+case "$input" in
+  *File*) echo '[0.0,0.0,1.0]' ;;
+  *validateSession*|*signin*) echo '[1.0,0.0,0.0]' ;;
+  *formatDate*|*calendar*) echo '[0.0,1.0,0.0]' ;;
+  *) echo '[0.0,0.0,1.0]' ;;
+esac
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = temp.path().join("embedder.sh");
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+        fs::write(
+            temp.path().join("auth.ts"),
+            "export function validateSession() { return true; }\nexport function formatDate() { return ''; }\n",
+        )
+        .unwrap();
+        let graph = build_graph(temp.path()).unwrap();
+        let command = temp.path().join("embedder.sh");
+        let embeddings =
+            build_embeddings_with_command(&graph, NEURAL_COMMAND_PROVIDER, Some(&command)).unwrap();
+        let vectors = embeddings
+            .into_iter()
+            .map(|embedding| (embedding.node_id, embedding.vector))
+            .collect();
+        let results = search_embeddings_with_command(
+            &graph,
+            &vectors,
+            "signin",
+            NEURAL_COMMAND_PROVIDER,
+            Some(&command),
             1,
         )
         .unwrap();

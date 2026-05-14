@@ -8,9 +8,16 @@ function text(value) {
 }
 
 const graphState = {
+  allNodes: [],
+  allEdges: [],
   nodes: [],
   edges: [],
   positions: new Map(),
+  velocities: new Map(),
+  viewport: { x: 0, y: 0, scale: 1 },
+  dragging: false,
+  lastPointer: null,
+  simulationTicks: 0,
 };
 
 async function loadSummary() {
@@ -27,19 +34,34 @@ async function loadSummary() {
 
 async function loadGraph() {
   const [nodes, edges] = await Promise.all([json("/api/nodes"), json("/api/edges")]);
-  graphState.nodes = visibleNodes(Array.isArray(nodes) ? nodes : []);
+  graphState.allNodes = Array.isArray(nodes) ? nodes : [];
+  graphState.allEdges = Array.isArray(edges) ? edges : [];
+  applyGraphFilters();
+}
+
+function applyGraphFilters() {
+  graphState.nodes = visibleNodes(graphState.allNodes);
   const visibleIds = new Set(graphState.nodes.map((node) => node.id));
-  graphState.edges = (Array.isArray(edges) ? edges : []).filter(
+  graphState.edges = graphState.allEdges.filter(
     (edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to),
   );
   document.querySelector("#graph-count").textContent =
     `${graphState.nodes.length} nodes / ${graphState.edges.length} edges`;
+  seedPositions();
+  runForceLayout();
   drawGraph();
 }
 
 function visibleNodes(nodes) {
+  const filter = document.querySelector("#graph-filter")?.value.trim().toLowerCase() || "";
+  const kind = document.querySelector("#graph-kind")?.value || "";
   return nodes
     .filter((node) => !["repository", "import"].includes(node.kind))
+    .filter((node) => !kind || node.kind === kind)
+    .filter((node) => {
+      if (!filter) return true;
+      return `${node.name} ${node.qualified_name} ${node.path}`.toLowerCase().includes(filter);
+    })
     .sort((left, right) => degree(right) - degree(left))
     .slice(0, 48);
 }
@@ -59,7 +81,13 @@ function drawGraph() {
   const width = canvas.width / scale;
   const height = canvas.height / scale;
   ctx.clearRect(0, 0, width, height);
-  layoutGraph(width, height);
+  if (graphState.simulationTicks < 90) {
+    tickForceLayout(width, height);
+    requestAnimationFrame(drawGraph);
+  }
+  ctx.save();
+  ctx.translate(graphState.viewport.x, graphState.viewport.y);
+  ctx.scale(graphState.viewport.scale, graphState.viewport.scale);
 
   ctx.lineWidth = 1;
   for (const edge of graphState.edges) {
@@ -88,10 +116,16 @@ function drawGraph() {
     ctx.textBaseline = "middle";
     ctx.fillText(node.name, point.x + radius + 5, point.y);
   }
+  ctx.restore();
 }
 
-function layoutGraph(width, height) {
+function seedPositions() {
   graphState.positions.clear();
+  graphState.velocities.clear();
+  graphState.simulationTicks = 0;
+  const canvas = document.querySelector("#graph-canvas");
+  const width = Math.max(640, canvas.getBoundingClientRect().width);
+  const height = Math.max(320, canvas.getBoundingClientRect().height);
   const centerX = width / 2;
   const centerY = height / 2;
   const radiusX = Math.max(160, width * 0.38);
@@ -103,7 +137,72 @@ function layoutGraph(width, height) {
       x: centerX + Math.cos(angle) * radiusX * (1 - hubPull),
       y: centerY + Math.sin(angle) * radiusY * (1 - hubPull),
     });
+    graphState.velocities.set(node.id, { x: 0, y: 0 });
   });
+}
+
+function runForceLayout() {
+  graphState.simulationTicks = 0;
+}
+
+function tickForceLayout(width, height) {
+  const center = { x: width / 2, y: height / 2 };
+  const nodes = graphState.nodes;
+  const edgePairs = graphState.edges
+    .map((edge) => [graphState.positions.get(edge.from), graphState.positions.get(edge.to)])
+    .filter(([from, to]) => from && to);
+  for (let i = 0; i < nodes.length; i += 1) {
+    const left = graphState.positions.get(nodes[i].id);
+    const leftVelocity = graphState.velocities.get(nodes[i].id);
+    if (!left || !leftVelocity) continue;
+    leftVelocity.x += (center.x - left.x) * 0.0008;
+    leftVelocity.y += (center.y - left.y) * 0.0008;
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const right = graphState.positions.get(nodes[j].id);
+      const rightVelocity = graphState.velocities.get(nodes[j].id);
+      if (!right || !rightVelocity) continue;
+      const dx = left.x - right.x;
+      const dy = left.y - right.y;
+      const distanceSquared = Math.max(60, dx * dx + dy * dy);
+      const force = 620 / distanceSquared;
+      leftVelocity.x += dx * force;
+      leftVelocity.y += dy * force;
+      rightVelocity.x -= dx * force;
+      rightVelocity.y -= dy * force;
+    }
+  }
+  for (const [from, to] of edgePairs) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.max(1, Math.hypot(dx, dy));
+    const force = (distance - 145) * 0.002;
+    const fx = (dx / distance) * force;
+    const fy = (dy / distance) * force;
+    for (const [point, direction] of [[from, 1], [to, -1]]) {
+      const node = nearestNode(point);
+      if (!node) continue;
+      const velocity = graphState.velocities.get(node.id);
+      velocity.x += fx * direction;
+      velocity.y += fy * direction;
+    }
+  }
+  for (const node of nodes) {
+    const point = graphState.positions.get(node.id);
+    const velocity = graphState.velocities.get(node.id);
+    if (!point || !velocity) continue;
+    point.x += velocity.x;
+    point.y += velocity.y;
+    velocity.x *= 0.82;
+    velocity.y *= 0.82;
+  }
+  graphState.simulationTicks += 1;
+}
+
+function nearestNode(point) {
+  for (const node of graphState.nodes) {
+    if (graphState.positions.get(node.id) === point) return node;
+  }
+  return null;
 }
 
 function colorForKind(kind) {
@@ -146,8 +245,8 @@ document.querySelector("#search-form").addEventListener("submit", (event) => {
 document.querySelector("#graph-canvas").addEventListener("click", (event) => {
   const canvas = event.currentTarget;
   const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
+  const x = (event.clientX - rect.left - graphState.viewport.x) / graphState.viewport.scale;
+  const y = (event.clientY - rect.top - graphState.viewport.y) / graphState.viewport.scale;
   let nearest = null;
   let distance = Infinity;
   for (const node of graphState.nodes) {
@@ -163,6 +262,53 @@ document.querySelector("#graph-canvas").addEventListener("click", (event) => {
     document.querySelector("#detail").textContent = text(nearest);
   }
 });
+
+document.querySelector("#graph-canvas").addEventListener("pointerdown", (event) => {
+  graphState.dragging = true;
+  graphState.lastPointer = { x: event.clientX, y: event.clientY };
+  event.currentTarget.setPointerCapture(event.pointerId);
+});
+
+document.querySelector("#graph-canvas").addEventListener("pointermove", (event) => {
+  if (!graphState.dragging || !graphState.lastPointer) return;
+  graphState.viewport.x += event.clientX - graphState.lastPointer.x;
+  graphState.viewport.y += event.clientY - graphState.lastPointer.y;
+  graphState.lastPointer = { x: event.clientX, y: event.clientY };
+  drawGraph();
+});
+
+document.querySelector("#graph-canvas").addEventListener("pointerup", (event) => {
+  graphState.dragging = false;
+  graphState.lastPointer = null;
+  event.currentTarget.releasePointerCapture(event.pointerId);
+});
+
+document.querySelector("#graph-canvas").addEventListener("wheel", (event) => {
+  event.preventDefault();
+  zoomGraph(event.deltaY < 0 ? 1.12 : 0.88, event.offsetX, event.offsetY);
+});
+
+document.querySelector("#graph-filter").addEventListener("input", applyGraphFilters);
+document.querySelector("#graph-kind").addEventListener("change", applyGraphFilters);
+document.querySelector("#graph-zoom-in").addEventListener("click", () => zoomGraph(1.18));
+document.querySelector("#graph-zoom-out").addEventListener("click", () => zoomGraph(0.84));
+document.querySelector("#graph-reset").addEventListener("click", () => {
+  graphState.viewport = { x: 0, y: 0, scale: 1 };
+  seedPositions();
+  runForceLayout();
+  drawGraph();
+});
+
+function zoomGraph(factor, originX = 450, originY = 210) {
+  const before = {
+    x: (originX - graphState.viewport.x) / graphState.viewport.scale,
+    y: (originY - graphState.viewport.y) / graphState.viewport.scale,
+  };
+  graphState.viewport.scale = Math.max(0.35, Math.min(3.5, graphState.viewport.scale * factor));
+  graphState.viewport.x = originX - before.x * graphState.viewport.scale;
+  graphState.viewport.y = originY - before.y * graphState.viewport.scale;
+  drawGraph();
+}
 
 window.addEventListener("resize", drawGraph);
 loadSummary();

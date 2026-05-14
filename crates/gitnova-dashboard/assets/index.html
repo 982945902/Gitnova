@@ -20,6 +20,23 @@
           <h2>Graph</h2>
           <span id="graph-count"></span>
         </div>
+        <div class="graph-controls">
+          <input id="graph-filter" type="search" placeholder="Filter nodes" />
+          <select id="graph-kind" aria-label="Node kind">
+            <option value="">All kinds</option>
+            <option value="file">Files</option>
+            <option value="module">Modules</option>
+            <option value="function">Functions</option>
+            <option value="method">Methods</option>
+            <option value="class">Classes</option>
+            <option value="struct">Structs</option>
+            <option value="interface">Interfaces</option>
+            <option value="trait">Traits</option>
+          </select>
+          <button id="graph-zoom-in" type="button">+</button>
+          <button id="graph-zoom-out" type="button">-</button>
+          <button id="graph-reset" type="button">Reset</button>
+        </div>
         <canvas id="graph-canvas" width="900" height="420"></canvas>
       </section>
       <section class="grid">

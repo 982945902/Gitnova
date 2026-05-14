@@ -486,11 +486,15 @@ gitnova impact-analysis "symbol" --repo <path> --limit 20
 gitnova architecture-map --repo <path> --focus auth
 gitnova diff-context --repo <path> [--base main]
 gitnova embeddings build --repo <path> --provider local-hash
+gitnova embeddings build --repo <path> --provider local-semantic
+GITNOVA_EMBEDDING_COMMAND=/path/to/embedder gitnova embeddings build --repo <path> --provider neural-command
 gitnova dashboard --repo <path> --port 4567
 gitnova serve
 ```
 
-Use `local-hash` embeddings for V0.2 if no real local embedding model is available. It should be deterministic lexical hashing, clearly documented as a baseline, and replaceable later.
+Embedding providers are pluggable. `local-hash` remains deterministic and offline,
+`local-semantic` adds offline domain-aware vectors, and `neural-command` invokes
+the command named by `GITNOVA_EMBEDDING_COMMAND` for real model-backed vectors.
 
 ## 10. Task Plan
 
@@ -542,7 +546,8 @@ Extract functions, methods, classes, structs, traits/interfaces, imports, and si
 Acceptance:
 
 - fixtures produce expected symbols and spans.
-- call/reference extraction is heuristic but tested.
+- AST-first extraction covers Rust, TypeScript, JavaScript, and Python, with
+  heuristic fallback for malformed syntax and simple call/reference recovery.
 - Commit: `feat: extract symbols from source`
 
 ### Task 6: Graph Builder
@@ -691,7 +696,8 @@ Acceptance:
 
 ### Task 17: Embedding Abstraction
 
-Implement deterministic local-hash embeddings first.
+Implement pluggable embeddings with deterministic local providers and a
+command-backed neural provider.
 
 Rules:
 
@@ -699,6 +705,8 @@ Rules:
 - Store vectors in SQLite as JSON.
 - Blend embedding similarity into ranker.
 - CLI command: `gitnova embeddings build --repo <path> --provider local-hash`.
+- CLI command: `gitnova embeddings build --repo <path> --provider local-semantic`.
+- CLI command: `GITNOVA_EMBEDDING_COMMAND=/path/to/embedder gitnova embeddings build --repo <path> --provider neural-command`.
 - MCP tool: `search_embeddings`.
 
 Acceptance:
@@ -767,6 +775,7 @@ cargo run -p gitnova -- explain-symbol "AuthService::validate" --repo tests/fixt
 cargo run -p gitnova -- impact-analysis "formatDate" --repo tests/fixtures/ts_sample --limit 10
 cargo run -p gitnova -- diff-context --repo tests/fixtures/rust_sample
 cargo run -p gitnova -- embeddings build --repo tests/fixtures/rust_sample --provider local-hash
+cargo run -p gitnova -- embeddings build --repo tests/fixtures/rust_sample --provider local-semantic
 cargo run -p gitnova -- dashboard --repo tests/fixtures/rust_sample --port 4567
 ```
 
@@ -825,7 +834,7 @@ Gitnova Full Challenge is complete when:
 - Git churn and diff-aware ranking influence results.
 - Incremental indexing updates changed files.
 - Watch mode updates the graph after file changes.
-- Embedding search works with local-hash provider.
-- LSP gracefully enriches when available and gracefully skips when unavailable.
-- Dashboard shows summary, nodes, edges, hubs, and ranked search results.
+- Embedding search works with local-hash, local-semantic, and neural-command providers when configured.
+- LSP gracefully enriches when available, uses project config and timeouts, and gracefully skips when unavailable.
+- Dashboard shows summary, nodes, edges, hubs, ranked search results, and an interactive graph canvas with filter, zoom, pan, and force layout.
 - `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings` pass.

@@ -20,5 +20,5 @@ Routes:
 - `/api/churn`
 
 The dashboard has no build step. Assets are plain HTML, CSS, and JavaScript
-served by Axum.
-
+served by Axum. The graph view supports node filtering, kind filtering, zoom,
+pan, reset, force layout, and click-to-inspect node details.

@@ -1,8 +1,9 @@
 use crate::{resources, tools};
 use rmcp::model::{
-    Annotated, CallToolRequestParams, CallToolResult, Content, JsonObject, ListResourcesResult,
-    ListToolsResult, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    Annotated, CallToolRequestParams, CallToolResult, Content, Implementation, JsonObject,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
@@ -79,6 +80,14 @@ impl ServerHandler for GitnovaRmcpServer {
                 .enable_tools()
                 .enable_resources()
                 .build(),
+            server_info: Implementation {
+                name: "gitnova-mcp".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                title: Some("Gitnova MCP".into()),
+                description: Some("Local-first code intelligence for Git repositories".into()),
+                icons: None,
+                website_url: None,
+            },
             ..Default::default()
         }
     }

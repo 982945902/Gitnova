@@ -19,6 +19,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     let mut child = Command::new(cargo_bin("gitnova"))
         .arg("serve")
         .env("GITNOVA_REPO", fixture("rust_sample"))
+        .env("GITNOVA_USE_LEGACY_STDIO", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,4 +85,59 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     assert!(serde_json::to_string(&responses[5])
         .unwrap()
         .contains("started"));
+}
+
+#[test]
+fn mcp_default_stdio_uses_rmcp_server() {
+    let mut child = Command::new(cargo_bin("gitnova"))
+        .arg("serve")
+        .env("GITNOVA_REPO", fixture("rust_sample"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(
+        stdin,
+        "{}",
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "gitnova-test", "version": "0.0.0"}
+            }),
+        )
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let init: Value = serde_json::from_str(&line).unwrap();
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+    )
+    .unwrap();
+    writeln!(stdin, "{}", rpc(2, "tools/list", json!({}))).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let tools: Value = serde_json::from_str(&line).unwrap();
+
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(init["result"]["serverInfo"]["name"], "gitnova-mcp");
+    assert!(serde_json::to_string(&tools)
+        .unwrap()
+        .contains("index_project"));
 }

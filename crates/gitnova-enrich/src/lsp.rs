@@ -3,7 +3,12 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+const DEFAULT_LSP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspStatus {
@@ -28,9 +33,19 @@ pub struct LspEnrichment {
     pub target_character: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspProbeConfig {
+    pub tool: String,
+    pub args: Vec<String>,
+    pub timeout: Duration,
+}
+
 pub trait LspTransport {
     fn send(&mut self, message: &Value) -> anyhow::Result<()>;
     fn receive(&mut self) -> anyhow::Result<Option<Value>>;
+    fn receive_timeout(&mut self, _timeout: Duration) -> anyhow::Result<Option<Value>> {
+        self.receive()
+    }
 }
 
 pub fn detect_language_servers() -> Vec<LspStatus> {
@@ -42,7 +57,11 @@ pub fn detect_language_servers() -> Vec<LspStatus> {
     .into_iter()
     .map(|tool| LspStatus {
         tool: tool.to_string(),
-        available: Command::new(tool).arg("--version").output().is_ok(),
+        available: Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false),
     })
     .collect()
 }
@@ -57,8 +76,18 @@ pub fn run_lsp_probe_with_command(
     root: impl AsRef<Path>,
     graph: &gitnova_core::CodeGraph,
 ) -> anyhow::Result<Vec<LspEnrichment>> {
+    run_lsp_probe_with_command_timeout(command, args, root, graph, DEFAULT_LSP_TIMEOUT)
+}
+
+pub fn run_lsp_probe_with_command_timeout(
+    command: impl AsRef<Path>,
+    args: &[&str],
+    root: impl AsRef<Path>,
+    graph: &gitnova_core::CodeGraph,
+    timeout: Duration,
+) -> anyhow::Result<Vec<LspEnrichment>> {
     let mut transport = ProcessLspTransport::spawn(command, args)?;
-    let result = probe_lsp_graph(&mut transport, root.as_ref(), graph);
+    let result = probe_lsp_graph_with_timeout(&mut transport, root.as_ref(), graph, timeout);
     let _ = transport.send(&json!({
         "jsonrpc": "2.0",
         "id": 10_000,
@@ -77,6 +106,15 @@ pub fn probe_lsp_graph(
     root: &Path,
     graph: &gitnova_core::CodeGraph,
 ) -> anyhow::Result<Vec<LspEnrichment>> {
+    probe_lsp_graph_with_timeout(transport, root, graph, DEFAULT_LSP_TIMEOUT)
+}
+
+pub fn probe_lsp_graph_with_timeout(
+    transport: &mut impl LspTransport,
+    root: &Path,
+    graph: &gitnova_core::CodeGraph,
+    timeout: Duration,
+) -> anyhow::Result<Vec<LspEnrichment>> {
     let mut id = 1u64;
     transport.send(&json!({
         "jsonrpc": "2.0",
@@ -88,7 +126,7 @@ pub fn probe_lsp_graph(
             "capabilities": {}
         }
     }))?;
-    let _ = transport.receive()?;
+    let _ = transport.receive_timeout(timeout)?;
     id += 1;
 
     let file_texts = graph
@@ -143,7 +181,7 @@ pub fn probe_lsp_graph(
                 "position": position
             }
         }))?;
-        if let Some(response) = transport.receive()? {
+        if let Some(response) = transport.receive_timeout(timeout)? {
             collect_locations(
                 &mut enrichments,
                 &node.id,
@@ -164,7 +202,7 @@ pub fn probe_lsp_graph(
                 "context": { "includeDeclaration": false }
             }
         }))?;
-        if let Some(response) = transport.receive()? {
+        if let Some(response) = transport.receive_timeout(timeout)? {
             collect_locations(
                 &mut enrichments,
                 &node.id,
@@ -177,6 +215,60 @@ pub fn probe_lsp_graph(
     }
 
     Ok(enrichments)
+}
+
+pub fn discover_lsp_probe_configs(
+    root: &Path,
+    graph: &gitnova_core::CodeGraph,
+    statuses: &[LspStatus],
+) -> Vec<LspProbeConfig> {
+    let available = statuses
+        .iter()
+        .filter(|status| status.available)
+        .map(|status| status.tool.as_str())
+        .collect::<HashSet<_>>();
+    let languages = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.language)
+        .collect::<HashSet<_>>();
+    let mut configs = Vec::new();
+    if languages.contains(&gitnova_core::Language::Rust)
+        && available.contains("rust-analyzer")
+        && root.join("Cargo.toml").exists()
+    {
+        configs.push(LspProbeConfig {
+            tool: "rust-analyzer".into(),
+            args: Vec::new(),
+            timeout: DEFAULT_LSP_TIMEOUT,
+        });
+    }
+    if (languages.contains(&gitnova_core::Language::TypeScript)
+        || languages.contains(&gitnova_core::Language::JavaScript))
+        && available.contains("typescript-language-server")
+        && ["package.json", "tsconfig.json", "jsconfig.json"]
+            .iter()
+            .any(|file| root.join(file).exists())
+    {
+        configs.push(LspProbeConfig {
+            tool: "typescript-language-server".into(),
+            args: vec!["--stdio".into()],
+            timeout: DEFAULT_LSP_TIMEOUT,
+        });
+    }
+    if languages.contains(&gitnova_core::Language::Python)
+        && available.contains("pyright-langserver")
+        && ["pyproject.toml", "setup.py", "requirements.txt"]
+            .iter()
+            .any(|file| root.join(file).exists())
+    {
+        configs.push(LspProbeConfig {
+            tool: "pyright-langserver".into(),
+            args: vec!["--stdio".into()],
+            timeout: DEFAULT_LSP_TIMEOUT,
+        });
+    }
+    configs
 }
 
 pub fn apply_lsp_enrichments(
@@ -267,16 +359,20 @@ pub fn apply_lsp_metadata(graph: &mut gitnova_core::CodeGraph) -> Vec<LspStatus>
     if std::env::var("GITNOVA_LSP_PROBE").as_deref() == Ok("1") {
         let repo_root = PathBuf::from(&graph.repo_root);
         let mut probe_tags = Vec::new();
-        for status in statuses.iter().filter(|status| status.available) {
-            let Some(args) = lsp_stdio_args(&status.tool) else {
-                continue;
-            };
-            match run_lsp_probe_with_command(&status.tool, args, &repo_root, graph) {
+        for config in discover_lsp_probe_configs(&repo_root, graph, &statuses) {
+            let args = config.args.iter().map(String::as_str).collect::<Vec<_>>();
+            match run_lsp_probe_with_command_timeout(
+                &config.tool,
+                &args,
+                &repo_root,
+                graph,
+                config.timeout,
+            ) {
                 Ok(enrichments) => {
                     let count = apply_lsp_enrichments(graph, &enrichments);
-                    probe_tags.push(format!("lsp:{}:probed:{count}", status.tool));
+                    probe_tags.push(format!("lsp:{}:probed:{count}", config.tool));
                 }
-                Err(err) => probe_tags.push(format!("lsp:{}:probe-error:{err}", status.tool)),
+                Err(err) => probe_tags.push(format!("lsp:{}:probe-error:{err}", config.tool)),
             }
         }
         if let Some(repo) = graph
@@ -290,18 +386,11 @@ pub fn apply_lsp_metadata(graph: &mut gitnova_core::CodeGraph) -> Vec<LspStatus>
     statuses
 }
 
-fn lsp_stdio_args(tool: &str) -> Option<&'static [&'static str]> {
-    match tool {
-        "rust-analyzer" => Some(&[]),
-        "typescript-language-server" | "pyright-langserver" => Some(&["--stdio"]),
-        _ => None,
-    }
-}
-
 struct ProcessLspTransport {
     _child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    rx: Receiver<anyhow::Result<Option<Value>>>,
+    _reader: JoinHandle<()>,
 }
 
 impl ProcessLspTransport {
@@ -320,11 +409,29 @@ impl ProcessLspTransport {
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("lsp process missing stdout"))?;
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let result = read_lsp_message(&mut stdout);
+                let done = matches!(result, Ok(None) | Err(_));
+                if tx.send(result).is_err() || done {
+                    break;
+                }
+            }
+        });
         Ok(Self {
             _child: child,
             stdin,
-            stdout: BufReader::new(stdout),
+            rx,
+            _reader: reader,
         })
+    }
+}
+
+impl Drop for ProcessLspTransport {
+    fn drop(&mut self) {
+        let _ = self._child.kill();
     }
 }
 
@@ -334,7 +441,15 @@ impl LspTransport for ProcessLspTransport {
     }
 
     fn receive(&mut self) -> anyhow::Result<Option<Value>> {
-        read_lsp_message(&mut self.stdout)
+        self.receive_timeout(DEFAULT_LSP_TIMEOUT)
+    }
+
+    fn receive_timeout(&mut self, timeout: Duration) -> anyhow::Result<Option<Value>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
+        }
     }
 }
 
@@ -469,6 +584,10 @@ impl LspTransport for MockLspTransport {
     fn receive(&mut self) -> anyhow::Result<Option<Value>> {
         Ok(self.responses.pop_front())
     }
+
+    fn receive_timeout(&mut self, _timeout: Duration) -> anyhow::Result<Option<Value>> {
+        self.receive()
+    }
 }
 
 #[cfg(test)]
@@ -563,5 +682,175 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.starts_with("lsp_definition:")));
+    }
+
+    #[test]
+    fn lsp_project_discovery_selects_configured_servers() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("package.json"), "{}\n").unwrap();
+        let mut graph = gitnova_core::CodeGraph::empty(temp.path().to_string_lossy().to_string());
+        graph.nodes.push(gitnova_core::Node {
+            id: "f".into(),
+            kind: gitnova_core::NodeKind::File,
+            name: "auth.ts".into(),
+            qualified_name: "src/auth.ts".into(),
+            path: "src/auth.ts".into(),
+            span: None,
+            language: Some(gitnova_core::Language::TypeScript),
+            text: String::new(),
+            tags: Vec::new(),
+            metrics: gitnova_core::NodeMetrics::default(),
+        });
+        let statuses = vec![
+            LspStatus {
+                tool: "typescript-language-server".into(),
+                available: true,
+            },
+            LspStatus {
+                tool: "rust-analyzer".into(),
+                available: true,
+            },
+        ];
+
+        let configs = discover_lsp_probe_configs(temp.path(), &graph, &statuses);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].tool, "typescript-language-server");
+        assert_eq!(configs[0].args, vec!["--stdio"]);
+    }
+
+    #[test]
+    fn lsp_transport_timeout_returns_instead_of_blocking() {
+        let mut transport = MockLspTransport::new(Vec::new());
+        let response = transport
+            .receive_timeout(std::time::Duration::from_millis(1))
+            .unwrap();
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn process_lsp_server_probe_uses_stdio_protocol() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let script = temp.path().join("mock_lsp.py");
+        std::fs::write(
+            &script,
+            r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.decode("ascii").strip()
+        if not line:
+            break
+        key, value = line.split(":", 1)
+        headers[key.lower()] = value.strip()
+    body = sys.stdin.buffer.read(int(headers["content-length"]))
+    return json.loads(body.decode("utf-8"))
+
+def send(message):
+    data = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(data)}\r\n\r\n".encode("ascii") + data)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if "id" not in msg:
+        continue
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+        break
+    elif method == "textDocument/definition":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"uri": "file:///repo/src/auth.ts", "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 8}}}})
+    elif method == "textDocument/references":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": [{"uri": "file:///repo/src/auth.ts", "range": {"start": {"line": 6, "character": 2}, "end": {"line": 6, "character": 10}}}]})
+"#,
+        )
+        .unwrap();
+        let mut graph = gitnova_core::CodeGraph::empty("/repo".into());
+        graph.nodes.push(gitnova_core::Node {
+            id: "symbol".into(),
+            kind: gitnova_core::NodeKind::Function,
+            name: "validateSession".into(),
+            qualified_name: "src/auth.ts::validateSession".into(),
+            path: "src/auth.ts".into(),
+            span: Some(gitnova_core::Span {
+                start_line: 4,
+                start_col: 1,
+                end_line: 8,
+                end_col: 2,
+            }),
+            language: Some(gitnova_core::Language::TypeScript),
+            text: "function validateSession() { return true; }".into(),
+            tags: Vec::new(),
+            metrics: gitnova_core::NodeMetrics::default(),
+        });
+
+        let enrichments = run_lsp_probe_with_command_timeout(
+            "python3",
+            &[script.to_str().unwrap()],
+            std::path::Path::new("/repo"),
+            &graph,
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert!(enrichments
+            .iter()
+            .any(|item| item.kind == LspRelationKind::Definition));
+        assert!(enrichments
+            .iter()
+            .any(|item| item.kind == LspRelationKind::Reference));
+    }
+
+    #[test]
+    fn real_rust_analyzer_probe_smoke_when_available() {
+        if !std::process::Command::new("rust-analyzer")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"lsp_smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn normalize_token() -> bool { true }\npub fn validate() -> bool { normalize_token() }\n",
+        )
+        .unwrap();
+        let graph = gitnova_core::build_graph(temp.path()).unwrap();
+        let result = run_lsp_probe_with_command_timeout(
+            "rust-analyzer",
+            &[],
+            temp.path(),
+            &graph,
+            std::time::Duration::from_millis(1_500),
+        );
+        assert!(
+            result.is_ok(),
+            "rust-analyzer probe should not error: {result:?}"
+        );
     }
 }
