@@ -3,3 +3,5 @@
 .DS_Store
 .gitnova/
 .VSCodeCounter/
+test-results/
+playwright-report/

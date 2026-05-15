@@ -44,11 +44,19 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
         ),
         rpc(
             5,
+            "tools/call",
+            json!({
+                "name":"graph_context",
+                "arguments":{"query":"auth validation", "depth": 1, "limit": 20}
+            }),
+        ),
+        rpc(
+            6,
             "resources/read",
             json!({"uri":"gitnova://graph/summary"}),
         ),
         rpc(
-            6,
+            7,
             "tools/call",
             json!({
                 "name":"watch_project",
@@ -60,7 +68,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     }
 
     let mut responses = Vec::new();
-    for _ in 0..6 {
+    for _ in 0..7 {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         responses.push(serde_json::from_str::<Value>(&line).unwrap());
@@ -79,10 +87,18 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     assert!(serde_json::to_string(&responses[3])
         .unwrap()
         .contains("indexed"));
-    assert!(serde_json::to_string(&responses[4])
+    assert!(
+        serde_json::to_string(&responses[4])
+            .unwrap()
+            .contains("graph_context")
+            || serde_json::to_string(&responses[4])
+                .unwrap()
+                .contains("target")
+    );
+    assert!(serde_json::to_string(&responses[5])
         .unwrap()
         .contains("\"nodes\""));
-    assert!(serde_json::to_string(&responses[5])
+    assert!(serde_json::to_string(&responses[6])
         .unwrap()
         .contains("started"));
 }
@@ -140,4 +156,7 @@ fn mcp_default_stdio_uses_rmcp_server() {
     assert!(serde_json::to_string(&tools)
         .unwrap()
         .contains("index_project"));
+    assert!(serde_json::to_string(&tools)
+        .unwrap()
+        .contains("graph_context"));
 }

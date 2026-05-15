@@ -17,10 +17,26 @@ const TOOL_DEFINITIONS: &[(&str, &str)] = &[
     ("index_project", "Index a repository into Gitnova storage"),
     ("rank_context", "Rank code context by salience"),
     (
+        "search_rank",
+        "Alias for rank_context with Web-friendly schema",
+    ),
+    (
+        "graph_context",
+        "Return a focused node neighborhood and relationship edges",
+    ),
+    (
+        "explain_node",
+        "Explain a node selected by id, symbol, or query",
+    ),
+    (
         "explain_symbol",
         "Explain a symbol and its graph neighborhood",
     ),
     ("impact_analysis", "Find reverse dependencies for a symbol"),
+    (
+        "impact",
+        "Alias for impact_analysis with node/query selectors",
+    ),
     ("architecture_map", "Summarize repository architecture"),
     ("watch_project", "Start a managed repository watcher"),
     ("watch_status", "Report a managed watcher's current state"),

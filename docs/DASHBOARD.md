@@ -16,9 +16,13 @@ Routes:
 - `/api/nodes`
 - `/api/edges`
 - `/api/rank?query=...`
+- `/api/graph-context?query=...`
+- `/api/explain?node_id=...`
+- `/api/impact?symbol=...`
 - `/api/hubs`
 - `/api/churn`
 
 The dashboard has no build step. Assets are plain HTML, CSS, and JavaScript
 served by Axum. The graph view supports node filtering, kind filtering, zoom,
-pan, reset, force layout, and click-to-inspect node details.
+pan, reset, force layout, ranked-search highlighting, and click-to-inspect
+focused graph context.

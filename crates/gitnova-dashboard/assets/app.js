@@ -14,7 +14,11 @@ const graphState = {
   edges: [],
   positions: new Map(),
   velocities: new Map(),
+  webgl: null,
   viewport: { x: 0, y: 0, scale: 1 },
+  highlightNodeIds: new Set(),
+  highlightEdgeKeys: new Set(),
+  selectedNodeId: null,
   dragging: false,
   lastPointer: null,
   simulationTicks: 0,
@@ -76,25 +80,195 @@ function drawGraph() {
   const scale = window.devicePixelRatio || 1;
   canvas.width = Math.max(640, Math.floor(rect.width * scale));
   canvas.height = Math.max(320, Math.floor(rect.height * scale));
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
   const width = canvas.width / scale;
   const height = canvas.height / scale;
-  ctx.clearRect(0, 0, width, height);
   if (graphState.simulationTicks < 90) {
     tickForceLayout(width, height);
     requestAnimationFrame(drawGraph);
   }
-  ctx.save();
-  ctx.translate(graphState.viewport.x, graphState.viewport.y);
-  ctx.scale(graphState.viewport.scale, graphState.viewport.scale);
+  const renderer = webglRenderer(canvas);
+  if (renderer) {
+    drawGraphWebgl(renderer, width, height);
+  } else {
+    drawGraph2d(canvas, width, height);
+  }
+  updateGraphLabels(width, height);
+}
 
-  ctx.lineWidth = 1;
+function webglRenderer(canvas) {
+  if (graphState.webgl?.canvas === canvas) return graphState.webgl;
+  const gl = canvas.getContext("webgl", {
+    alpha: false,
+    antialias: true,
+    preserveDrawingBuffer: true,
+  });
+  if (!gl) return null;
+  const pointProgram = createProgram(
+    gl,
+    `
+      attribute vec2 a_position;
+      attribute vec4 a_color;
+      attribute float a_size;
+      varying vec4 v_color;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        gl_PointSize = a_size;
+        v_color = a_color;
+      }
+    `,
+    `
+      precision mediump float;
+      varying vec4 v_color;
+      void main() {
+        vec2 offset = gl_PointCoord - vec2(0.5);
+        if (dot(offset, offset) > 0.25) {
+          discard;
+        }
+        gl_FragColor = v_color;
+      }
+    `,
+  );
+  const lineProgram = createProgram(
+    gl,
+    `
+      attribute vec2 a_position;
+      attribute vec4 a_color;
+      varying vec4 v_color;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        v_color = a_color;
+      }
+    `,
+    `
+      precision mediump float;
+      varying vec4 v_color;
+      void main() {
+        gl_FragColor = v_color;
+      }
+    `,
+  );
+  graphState.webgl = {
+    canvas,
+    gl,
+    pointProgram,
+    lineProgram,
+    pointBuffer: gl.createBuffer(),
+    lineBuffer: gl.createBuffer(),
+  };
+  return graphState.webgl;
+}
+
+function createProgram(gl, vertexSource, fragmentSource) {
+  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program) || "Unable to link WebGL program");
+  }
+  return program;
+}
+
+function compileShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(shader) || "Unable to compile WebGL shader");
+  }
+  return shader;
+}
+
+function drawGraphWebgl(renderer, width, height) {
+  const { gl } = renderer;
+  const pixelRatio = window.devicePixelRatio || 1;
+  gl.viewport(0, 0, Math.floor(width * pixelRatio), Math.floor(height * pixelRatio));
+  gl.clearColor(1, 1, 1, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  drawWebglLines(renderer, width, height);
+  drawWebglPoints(renderer, width, height);
+}
+
+function drawWebglLines(renderer, width, height) {
+  const { gl, lineProgram, lineBuffer } = renderer;
+  const data = [];
   for (const edge of graphState.edges) {
     const from = graphState.positions.get(edge.from);
     const to = graphState.positions.get(edge.to);
     if (!from || !to) continue;
-    ctx.strokeStyle = edge.kind === "calls" ? "#2563eb55" : "#66708533";
+    const highlighted = graphState.highlightEdgeKeys.has(edgeKey(edge));
+    const color = highlighted ? rgba("#e11d48", 0.95) : edge.kind === "calls" ? rgba("#2563eb", 0.34) : rgba("#667085", 0.22);
+    for (const point of [from, to]) {
+      const clip = clipPoint(point, width, height);
+      data.push(clip.x, clip.y, color.r, color.g, color.b, color.a);
+    }
+  }
+  gl.useProgram(lineProgram);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
+  const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
+  const position = gl.getAttribLocation(lineProgram, "a_position");
+  const color = gl.getAttribLocation(lineProgram, "a_color");
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(color);
+  gl.vertexAttribPointer(color, 4, gl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+  gl.lineWidth(1);
+  gl.drawArrays(gl.LINES, 0, data.length / 6);
+}
+
+function drawWebglPoints(renderer, width, height) {
+  const { gl, pointProgram, pointBuffer } = renderer;
+  const data = [];
+  const pixelRatio = window.devicePixelRatio || 1;
+  for (const node of graphState.nodes) {
+    const point = graphState.positions.get(node.id);
+    if (!point) continue;
+    const highlighted = graphState.highlightNodeIds.has(node.id);
+    const selected = graphState.selectedNodeId === node.id;
+    const clip = clipPoint(point, width, height);
+    const fill = rgba(colorForKind(node.kind), 0.92);
+    if (highlighted || selected) {
+      const ring = selected ? rgba("#111827", 0.96) : rgba("#e11d48", 0.9);
+      data.push(clip.x, clip.y, ring.r, ring.g, ring.b, ring.a, (nodeRadius(node) * 2 + 8) * pixelRatio);
+    }
+    data.push(clip.x, clip.y, fill.r, fill.g, fill.b, fill.a, nodeRadius(node) * 2 * pixelRatio);
+  }
+  gl.useProgram(pointProgram);
+  gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
+  const stride = 7 * Float32Array.BYTES_PER_ELEMENT;
+  const position = gl.getAttribLocation(pointProgram, "a_position");
+  const color = gl.getAttribLocation(pointProgram, "a_color");
+  const size = gl.getAttribLocation(pointProgram, "a_size");
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(color);
+  gl.vertexAttribPointer(color, 4, gl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+  gl.enableVertexAttribArray(size);
+  gl.vertexAttribPointer(size, 1, gl.FLOAT, false, stride, 6 * Float32Array.BYTES_PER_ELEMENT);
+  gl.drawArrays(gl.POINTS, 0, data.length / 7);
+}
+
+function drawGraph2d(canvas, width, height) {
+  const ctx = canvas.getContext("2d");
+  const scale = window.devicePixelRatio || 1;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.translate(graphState.viewport.x, graphState.viewport.y);
+  ctx.scale(graphState.viewport.scale, graphState.viewport.scale);
+  for (const edge of graphState.edges) {
+    const from = graphState.positions.get(edge.from);
+    const to = graphState.positions.get(edge.to);
+    if (!from || !to) continue;
+    const highlighted = graphState.highlightEdgeKeys.has(edgeKey(edge));
+    ctx.strokeStyle = highlighted ? "#e11d48" : edge.kind === "calls" ? "#2563eb55" : "#66708533";
+    ctx.lineWidth = highlighted ? 2.5 : 1;
     ctx.beginPath();
     ctx.moveTo(from.x, from.y);
     ctx.lineTo(to.x, to.y);
@@ -103,10 +277,12 @@ function drawGraph() {
 
   for (const node of graphState.nodes) {
     const point = graphState.positions.get(node.id);
-    const radius = Math.max(5, Math.min(13, 5 + degree(node)));
+    const highlighted = graphState.highlightNodeIds.has(node.id);
+    const selected = graphState.selectedNodeId === node.id;
+    const radius = nodeRadius(node);
     ctx.fillStyle = colorForKind(node.kind);
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = selected ? "#111827" : highlighted ? "#e11d48" : "#ffffff";
+    ctx.lineWidth = selected ? 3 : 2;
     ctx.beginPath();
     ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
     ctx.fill();
@@ -117,6 +293,67 @@ function drawGraph() {
     ctx.fillText(node.name, point.x + radius + 5, point.y);
   }
   ctx.restore();
+}
+
+function nodeRadius(node) {
+  const highlighted = graphState.highlightNodeIds.has(node.id);
+  return Math.max(5, Math.min(13, 5 + degree(node))) + (highlighted ? 3 : 0);
+}
+
+function clipPoint(point, width, height) {
+  const screen = screenPoint(point);
+  return {
+    x: (screen.x / width) * 2 - 1,
+    y: 1 - (screen.y / height) * 2,
+  };
+}
+
+function screenPoint(point) {
+  return {
+    x: point.x * graphState.viewport.scale + graphState.viewport.x,
+    y: point.y * graphState.viewport.scale + graphState.viewport.y,
+  };
+}
+
+function rgba(hex, alpha) {
+  const value = hex.replace("#", "");
+  const parsed = Number.parseInt(value, 16);
+  return {
+    r: ((parsed >> 16) & 255) / 255,
+    g: ((parsed >> 8) & 255) / 255,
+    b: (parsed & 255) / 255,
+    a: alpha,
+  };
+}
+
+function updateGraphLabels(width, height) {
+  const labels = document.querySelector("#graph-labels");
+  labels.innerHTML = "";
+  const visible = graphState.nodes
+    .sort((left, right) => {
+      const leftHighlighted = graphState.highlightNodeIds.has(left.id) ? 1 : 0;
+      const rightHighlighted = graphState.highlightNodeIds.has(right.id) ? 1 : 0;
+      return rightHighlighted - leftHighlighted || degree(right) - degree(left);
+    })
+    .slice(0, 26);
+  for (const node of visible) {
+    const point = graphState.positions.get(node.id);
+    if (!point) continue;
+    const screen = screenPoint(point);
+    const x = Math.max(4, Math.min(width - 160, screen.x + nodeRadius(node) + 6));
+    const y = Math.max(4, Math.min(height - 24, screen.y - 10));
+    const label = document.createElement("span");
+    label.className = graphState.highlightNodeIds.has(node.id)
+      ? "graph-label is-highlighted"
+      : "graph-label";
+    label.textContent = node.name;
+    label.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    labels.appendChild(label);
+  }
+}
+
+function edgeKey(edge) {
+  return `${edge.from}->${edge.to}:${edge.kind}`;
 }
 
 function seedPositions() {
@@ -231,10 +468,30 @@ async function search(query) {
     const item = document.createElement("li");
     item.textContent = `${result.node.qualified_name} ${result.score.toFixed(3)}`;
     item.addEventListener("click", () => {
-      document.querySelector("#detail").textContent = text(result.node);
+      focusContext(result.node.id, result.node);
     });
     results.appendChild(item);
   }
+  if (data.results?.[0]?.node?.id) {
+    await focusContext(data.results[0].node.id, data.results[0].node);
+  }
+}
+
+async function focusContext(nodeId, fallbackNode) {
+  const context = await json(
+    `/api/graph-context?node_id=${encodeURIComponent(nodeId)}&depth=1&limit=40`,
+  );
+  graphState.selectedNodeId = nodeId;
+  graphState.highlightNodeIds = new Set((context.nodes || []).map((node) => node.id));
+  graphState.highlightEdgeKeys = new Set((context.edges || []).map(edgeKey));
+  document.querySelector("#detail").textContent = text({
+    summary: context.summary,
+    target: context.target || fallbackNode,
+    incoming: context.incoming || [],
+    outgoing: context.outgoing || [],
+    edges: context.edges || [],
+  });
+  drawGraph();
 }
 
 document.querySelector("#search-form").addEventListener("submit", (event) => {
@@ -259,7 +516,7 @@ document.querySelector("#graph-canvas").addEventListener("click", (event) => {
     }
   }
   if (nearest && distance < 28) {
-    document.querySelector("#detail").textContent = text(nearest);
+    focusContext(nearest.id, nearest);
   }
 });
 

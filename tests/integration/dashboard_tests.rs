@@ -88,6 +88,53 @@ fn dashboard_serves_summary_api() {
 }
 
 #[test]
+fn dashboard_serves_ranked_graph_context_api() {
+    let repo = fixture("ts_sample");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let port = free_port();
+    let mut child = ProcessCommand::new(cargo_bin("gitnova"))
+        .args([
+            "dashboard",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut context = None;
+    while Instant::now() < deadline {
+        if let Some(json) = get_json(
+            port,
+            "/api/graph-context?query=auth%20session&depth=1&limit=20",
+        ) {
+            context = Some(json);
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    child.kill().ok();
+    child.wait().ok();
+
+    let context = context.expect("dashboard /api/graph-context should respond with JSON");
+    assert!(context["target"]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("validateSession"));
+    assert!(!context["edges"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn dashboard_serves_graph_visualization_shell() {
     let repo = fixture("rust_sample");
     Command::cargo_bin("gitnova")
@@ -112,10 +159,14 @@ fn dashboard_serves_graph_visualization_shell() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut html = None;
+    let mut app_js = None;
     while Instant::now() < deadline {
         if let Some(text) = get_text(port, "/") {
             html = Some(text);
-            break;
+            app_js = get_text(port, "/assets/app.js");
+            if app_js.is_some() {
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -125,8 +176,12 @@ fn dashboard_serves_graph_visualization_shell() {
 
     let html = html.expect("dashboard index should respond");
     assert!(html.contains("graph-canvas"));
+    assert!(html.contains("graph-labels"));
     assert!(html.contains("Graph"));
     assert!(html.contains("graph-filter"));
     assert!(html.contains("graph-kind"));
     assert!(html.contains("graph-zoom-in"));
+
+    let app_js = app_js.expect("dashboard app js should respond");
+    assert!(app_js.contains("webgl"));
 }

@@ -18,13 +18,16 @@ pub fn tokenize(value: &str) -> Vec<String> {
 
 pub fn normalize_token(token: &str) -> String {
     let mut value = token.to_ascii_lowercase();
+    if matches!(value.as_str(), "validation" | "validated" | "validating") {
+        return "validate".into();
+    }
     for suffix in ["ing", "ed", "ion", "ions", "s"] {
         if value.len() > suffix.len() + 3 && value.ends_with(suffix) {
             value.truncate(value.len() - suffix.len());
             break;
         }
     }
-    if value == "validation" {
+    if value == "validation" || value == "validat" {
         "validate".into()
     } else {
         value
@@ -52,8 +55,18 @@ pub fn lexical_match(query: &str, query_tokens: &[String], node: &Node) -> f64 {
     let haystack =
         format!("{} {} {}", node.name, node.qualified_name, node.path).to_ascii_lowercase();
     let query_lower = query.to_ascii_lowercase();
-    if haystack.contains(&query_lower) || query_lower.contains(&node.name.to_ascii_lowercase()) {
+    if haystack.contains(&query_lower) {
         return 1.0;
+    }
+    let node_name_lower = node.name.to_ascii_lowercase();
+    if query_lower.contains(&node_name_lower) {
+        let name_tokens = tokenize(&node.name);
+        let name_bonus: f64 = if name_tokens.len() > 1 || node_name_lower.len() >= 10 {
+            1.0
+        } else {
+            0.70
+        };
+        return name_bonus.max(query_overlap(query_tokens, node));
     }
     query_overlap(query_tokens, node)
 }

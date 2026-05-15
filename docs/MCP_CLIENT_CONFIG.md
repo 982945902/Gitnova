@@ -20,8 +20,12 @@ Tools:
 
 - `index_project`
 - `rank_context`
+- `search_rank`
+- `graph_context`
+- `explain_node`
 - `explain_symbol`
 - `impact_analysis`
+- `impact`
 - `architecture_map`
 - `watch_project`
 - `watch_status`

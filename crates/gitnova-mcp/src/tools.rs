@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gitnova_core::{build_graph_from_entries, query, scan_repository};
+use gitnova_core::{build_graph_from_entries, query, scan_repository, CodeGraph};
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
@@ -49,8 +49,12 @@ pub fn list_tools() -> Value {
         "tools": [
             tool("index_project", "Index a repository into Gitnova storage"),
             tool("rank_context", "Rank code context by salience"),
+            tool("search_rank", "Alias for rank_context with Web-friendly schema"),
+            tool("graph_context", "Return a focused node neighborhood and relationship edges"),
+            tool("explain_node", "Explain a node selected by id, symbol, or query"),
             tool("explain_symbol", "Explain a symbol and its graph neighborhood"),
             tool("impact_analysis", "Find reverse dependencies for a symbol"),
+            tool("impact", "Alias for impact_analysis with node/query selectors"),
             tool("architecture_map", "Summarize repository architecture"),
             tool("watch_project", "Report watch mode availability for a repository"),
             tool("watch_status", "Report a managed watcher's current state"),
@@ -83,7 +87,7 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             *repo_state = path.clone();
             json!(index_repo(&path)?)
         }
-        "rank_context" => {
+        "rank_context" | "search_rank" => {
             let query_text = arguments
                 .get("query")
                 .and_then(Value::as_str)
@@ -106,6 +110,18 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
                 similarities.as_ref()
             ))
         }
+        "graph_context" => {
+            let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
+            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
+            let selector = selector_from_arguments(arguments, &graph);
+            json!(query::graph_context(&graph, &selector, depth, limit))
+        }
+        "explain_node" => {
+            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
+            let selector = selector_from_arguments(arguments, &graph);
+            json!(query::explain_node(&graph, &selector))
+        }
         "explain_symbol" => {
             let symbol = arguments
                 .get("symbol")
@@ -114,14 +130,11 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
             json!(query::explain_symbol(&graph, symbol))
         }
-        "impact_analysis" => {
-            let symbol = arguments
-                .get("symbol")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+        "impact_analysis" | "impact" => {
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            json!(query::impact_analysis(&graph, symbol, limit))
+            let selector = selector_from_arguments(arguments, &graph);
+            json!(query::impact_analysis(&graph, &selector, limit))
         }
         "architecture_map" => {
             let focus = arguments.get("focus").and_then(Value::as_str);
@@ -186,6 +199,27 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
         ],
         "isError": false
     }))
+}
+
+fn selector_from_arguments(arguments: &Value, graph: &CodeGraph) -> String {
+    for key in ["node_id", "selector", "symbol"] {
+        if let Some(value) = arguments.get(key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    if let Some(query_text) = arguments.get("query").and_then(Value::as_str) {
+        if let Some(result) = rank_graph_with_embeddings(graph, query_text, 1, None)
+            .results
+            .into_iter()
+            .next()
+        {
+            return result.node.id;
+        }
+        return query_text.to_string();
+    }
+    String::new()
 }
 
 fn start_watch_project(repo: PathBuf) -> Result<Value> {

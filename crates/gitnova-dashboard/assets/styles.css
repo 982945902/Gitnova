@@ -85,13 +85,46 @@ button {
   min-width: 36px;
 }
 
+.graph-stage {
+  position: relative;
+  overflow: hidden;
+  background: white;
+  border: 1px solid #d9dee7;
+  border-radius: 6px;
+}
+
 #graph-canvas {
   display: block;
   width: 100%;
   height: 420px;
-  background: white;
-  border: 1px solid #d9dee7;
-  border-radius: 6px;
+}
+
+#graph-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.graph-label {
+  position: absolute;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 2px 5px;
+  border: 1px solid rgba(217, 222, 231, 0.86);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #20242c;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.graph-label.is-highlighted {
+  border-color: rgba(225, 29, 72, 0.48);
+  color: #9f1239;
+  font-weight: 600;
 }
 
 pre,

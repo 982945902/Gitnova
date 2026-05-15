@@ -32,6 +32,7 @@ gitnova watch --repo <path>
 gitnova stats --repo <path>
 gitnova rank-context "query" --repo <path> --limit 10
 gitnova explain-symbol "symbol" --repo <path>
+gitnova graph-context "symbol-or-node-id" --repo <path> --depth 1 --limit 40
 gitnova impact-analysis "symbol" --repo <path> --limit 20
 gitnova architecture-map --repo <path> --focus auth
 gitnova diff-context --repo <path> [--base main]
@@ -41,3 +42,7 @@ GITNOVA_EMBEDDING_COMMAND=/path/to/embedder gitnova embeddings build --repo <pat
 gitnova dashboard --repo <path> --port 4567
 gitnova serve
 ```
+
+For the product demo loop, use `rank-context` to find the most relevant code,
+then `graph-context` to return the focused node, source snippet, immediate
+relationships, and graph edges that the Web showcase can highlight.

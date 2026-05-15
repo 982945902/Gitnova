@@ -30,6 +30,8 @@ enum Commands {
     RankContext(RankArgs),
     #[command(name = "explain-symbol")]
     ExplainSymbol(SymbolArgs),
+    #[command(name = "graph-context")]
+    GraphContext(GraphContextArgs),
     #[command(name = "impact-analysis")]
     ImpactAnalysis(ImpactArgs),
     #[command(name = "architecture-map")]
@@ -68,6 +70,17 @@ struct SymbolArgs {
     symbol: String,
     #[arg(long)]
     repo: PathBuf,
+}
+
+#[derive(Args)]
+struct GraphContextArgs {
+    selector: String,
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    depth: usize,
+    #[arg(long, default_value_t = 40)]
+    limit: usize,
 }
 
 #[derive(Args)]
@@ -168,6 +181,15 @@ async fn main() -> Result<()> {
         Commands::ExplainSymbol(args) => {
             let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
             print_json(&query::explain_symbol(&graph, &args.symbol))?;
+        }
+        Commands::GraphContext(args) => {
+            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            print_json(&query::graph_context(
+                &graph,
+                &args.selector,
+                args.depth,
+                args.limit,
+            ))?;
         }
         Commands::ImpactAnalysis(args) => {
             let graph = GitnovaStore::open(&args.repo)?.load_graph()?;

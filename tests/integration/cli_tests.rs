@@ -137,6 +137,67 @@ fn salience_downranks_generic_utility_unless_query_targets_it() {
 }
 
 #[test]
+fn graph_context_returns_web_ready_node_neighborhood() {
+    let (_temp, repo) = temp_fixture("ts_sample");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args([
+            "graph-context",
+            "validateSession",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--depth",
+            "1",
+            "--limit",
+            "20",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(context["schema_version"].as_u64().unwrap(), 1);
+    assert!(context["target"]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("validateSession"));
+    assert!(context["summary"]
+        .as_str()
+        .unwrap()
+        .contains("graph relationships"));
+    assert!(context["nodes"].as_array().unwrap().len() >= 3);
+    assert!(!context["edges"].as_array().unwrap().is_empty());
+
+    let impact = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args([
+            "impact-analysis",
+            "formatDate",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--limit",
+            "10",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let impact: Value = serde_json::from_slice(&impact).unwrap();
+    assert_eq!(
+        impact["symbol"]["qualified_name"].as_str().unwrap(),
+        "src/utils.ts::formatDate"
+    );
+}
+
+#[test]
 fn cli_exposes_core_workflows_and_embeddings() {
     let (_temp, repo) = temp_fixture("ts_sample");
     Command::cargo_bin("gitnova")
@@ -151,6 +212,14 @@ fn cli_exposes_core_workflows_and_embeddings() {
             "formatDate",
             "--repo",
             repo.to_str().unwrap(),
+        ],
+        vec![
+            "graph-context",
+            "formatDate",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--depth",
+            "1",
         ],
         vec![
             "impact-analysis",

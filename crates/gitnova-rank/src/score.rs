@@ -39,6 +39,8 @@ impl Default for RankConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankResponse {
+    pub schema_version: u32,
+    pub repo_root: String,
     pub query: String,
     pub results: Vec<RankedNode>,
 }
@@ -97,6 +99,8 @@ pub fn rank_graph_with_embeddings(
     });
     results.truncate(limit);
     RankResponse {
+        schema_version: graph.schema_version,
+        repo_root: graph.repo_root.clone(),
         query: query.to_string(),
         results,
     }
@@ -190,13 +194,18 @@ mod tests {
         .unwrap();
         fs::write(
             temp.path().join("auth.ts"),
-            "import { formatDate } from './utils';\nexport function validateSession(s: any): boolean { return formatDate(s.expiresAt).length > 0; }\n",
+            "import { formatDate } from './utils';\nexport interface Session { userId: string; expiresAt: Date; }\nexport function validateSession(s: Session): boolean { return formatDate(s.expiresAt).length > 0; }\n",
         )
         .unwrap();
         let graph = build_graph(temp.path()).unwrap();
         assert!(graph.edges.iter().any(|edge| edge.kind == EdgeKind::Calls));
         let auth = rank_graph(&graph, "change auth session validation", 3);
         assert!(auth.results[0]
+            .node
+            .qualified_name
+            .contains("validateSession"));
+        let validated = rank_graph(&graph, "Where is auth session validated?", 3);
+        assert!(validated.results[0]
             .node
             .qualified_name
             .contains("validateSession"));
