@@ -20,6 +20,8 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
         .arg("serve")
         .env("GITNOVA_REPO", fixture("rust_sample"))
         .env("GITNOVA_USE_LEGACY_STDIO", "1")
+        .env_remove("GITNOVA_LLM_API_KEY")
+        .env_remove("GITNOVA_LLM_MODEL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -52,11 +54,19 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
         ),
         rpc(
             6,
+            "tools/call",
+            json!({
+                "name":"answer_with_context",
+                "arguments":{"query":"Where is auth validation handled?", "depth": 1, "limit": 20}
+            }),
+        ),
+        rpc(
+            7,
             "resources/read",
             json!({"uri":"gitnova://graph/summary"}),
         ),
         rpc(
-            7,
+            8,
             "tools/call",
             json!({
                 "name":"watch_project",
@@ -68,7 +78,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     }
 
     let mut responses = Vec::new();
-    for _ in 0..7 {
+    for _ in 0..8 {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         responses.push(serde_json::from_str::<Value>(&line).unwrap());
@@ -97,8 +107,14 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     );
     assert!(serde_json::to_string(&responses[5])
         .unwrap()
-        .contains("\"nodes\""));
+        .contains("evidence"));
+    assert!(serde_json::to_string(&responses[5])
+        .unwrap()
+        .contains("llm_used"));
     assert!(serde_json::to_string(&responses[6])
+        .unwrap()
+        .contains("\"nodes\""));
+    assert!(serde_json::to_string(&responses[7])
         .unwrap()
         .contains("started"));
 }
@@ -108,6 +124,8 @@ fn mcp_default_stdio_uses_rmcp_server() {
     let mut child = Command::new(cargo_bin("gitnova"))
         .arg("serve")
         .env("GITNOVA_REPO", fixture("rust_sample"))
+        .env_remove("GITNOVA_LLM_API_KEY")
+        .env_remove("GITNOVA_LLM_MODEL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -159,4 +177,7 @@ fn mcp_default_stdio_uses_rmcp_server() {
     assert!(serde_json::to_string(&tools)
         .unwrap()
         .contains("graph_context"));
+    assert!(serde_json::to_string(&tools)
+        .unwrap()
+        .contains("answer_with_context"));
 }

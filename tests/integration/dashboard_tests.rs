@@ -135,6 +135,67 @@ fn dashboard_serves_ranked_graph_context_api() {
 }
 
 #[test]
+fn dashboard_serves_answer_api_with_deterministic_fallback() {
+    let repo = fixture("ts_sample");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let port = free_port();
+    let mut command = ProcessCommand::new(cargo_bin("gitnova"));
+    command
+        .args([
+            "dashboard",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+        ])
+        .env_remove("GITNOVA_LLM_API_KEY")
+        .env_remove("GITNOVA_LLM_MODEL")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answer = None;
+    while Instant::now() < deadline {
+        if let Some(json) = get_json(
+            port,
+            "/api/answer?query=Where%20is%20auth%20session%20validated%3F",
+        ) {
+            answer = Some(json);
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    child.kill().ok();
+    child.wait().ok();
+
+    let answer = answer.expect("dashboard /api/answer should respond with JSON");
+    assert_eq!(answer["llm_used"], false);
+    assert!(answer["fallback_reason"]
+        .as_str()
+        .unwrap()
+        .contains("GITNOVA"));
+    assert!(answer["answer"]
+        .as_str()
+        .unwrap()
+        .contains("validateSession"));
+    assert!(answer["evidence"][0]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("validateSession"));
+    assert!(answer["context"]["target"]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("validateSession"));
+}
+
+#[test]
 fn dashboard_serves_graph_visualization_shell() {
     let repo = fixture("rust_sample");
     Command::cargo_bin("gitnova")

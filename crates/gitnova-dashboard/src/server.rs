@@ -4,6 +4,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
 use gitnova_core::query;
+use gitnova_enrich::llm;
 use gitnova_rank::rank_graph;
 use gitnova_storage::GitnovaStore;
 use serde::Deserialize;
@@ -33,6 +34,13 @@ struct ContextParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AnswerParams {
+    query: Option<String>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+}
+
 pub async fn run_dashboard(repo_root: PathBuf, port: u16) -> Result<()> {
     let state = DashboardState {
         repo_root: Arc::new(repo_root),
@@ -45,6 +53,7 @@ pub async fn run_dashboard(repo_root: PathBuf, port: u16) -> Result<()> {
         .route("/api/nodes", get(nodes))
         .route("/api/edges", get(edges))
         .route("/api/rank", get(rank))
+        .route("/api/answer", get(answer))
         .route("/api/graph-context", get(graph_context))
         .route("/api/explain", get(explain))
         .route("/api/impact", get(impact))
@@ -96,6 +105,23 @@ async fn rank(
     Json(load_graph_value(&state, |graph| {
         let query = params.query.unwrap_or_else(|| "architecture".into());
         json!(rank_graph(&graph, &query, params.limit.unwrap_or(10)))
+    }))
+}
+
+async fn answer(
+    State(state): State<DashboardState>,
+    Query(params): Query<AnswerParams>,
+) -> Json<Value> {
+    Json(load_graph_value(&state, |graph| {
+        let query = params
+            .query
+            .unwrap_or_else(|| "Where is auth session validated?".into());
+        json!(llm::answer_with_context(
+            &graph,
+            &query,
+            params.depth.unwrap_or(1),
+            params.limit.unwrap_or(40)
+        ))
     }))
 }
 

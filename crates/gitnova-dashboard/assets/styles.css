@@ -128,7 +128,8 @@ button {
 }
 
 pre,
-li {
+li,
+.answer-box {
   background: white;
   border: 1px solid #d9dee7;
   border-radius: 6px;
@@ -137,6 +138,18 @@ li {
 pre {
   overflow: auto;
   padding: 12px;
+}
+
+.answer-box {
+  margin-bottom: 12px;
+  padding: 12px;
+  line-height: 1.45;
+}
+
+.answer-meta {
+  margin-top: 8px;
+  color: #667085;
+  font-size: 12px;
 }
 
 li {

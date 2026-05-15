@@ -16,6 +16,7 @@ Routes:
 - `/api/nodes`
 - `/api/edges`
 - `/api/rank?query=...`
+- `/api/answer?query=...`
 - `/api/graph-context?query=...`
 - `/api/explain?node_id=...`
 - `/api/impact?symbol=...`
@@ -24,5 +25,7 @@ Routes:
 
 The dashboard has no build step. Assets are plain HTML, CSS, and JavaScript
 served by Axum. The graph view supports node filtering, kind filtering, zoom,
-pan, reset, force layout, ranked-search highlighting, and click-to-inspect
-focused graph context.
+pan, reset, force layout, ranked-search highlighting, evidence-backed answer
+display, and click-to-inspect focused graph context. `/api/answer` uses the
+optional LLM provider when `GITNOVA_LLM_API_KEY` and `GITNOVA_LLM_MODEL` are
+configured; otherwise it returns a deterministic fallback with evidence.

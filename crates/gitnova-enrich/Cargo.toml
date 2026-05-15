@@ -10,6 +10,7 @@ git2.workspace = true
 gitnova-core = { path = "../gitnova-core" }
 gitnova-rank = { path = "../gitnova-rank" }
 gitnova-storage = { path = "../gitnova-storage" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

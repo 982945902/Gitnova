@@ -29,6 +29,18 @@ const TOOL_DEFINITIONS: &[(&str, &str)] = &[
         "Explain a node selected by id, symbol, or query",
     ),
     (
+        "answer_with_context",
+        "Answer a question using ranked graph evidence and optional LLM explanation",
+    ),
+    (
+        "llm_explain_node",
+        "Explain a node using graph evidence and optional LLM wording",
+    ),
+    (
+        "llm_impact_summary",
+        "Summarize symbol impact using graph evidence and optional LLM wording",
+    ),
+    (
         "explain_symbol",
         "Explain a symbol and its graph neighborhood",
     ),

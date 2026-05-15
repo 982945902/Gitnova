@@ -461,9 +461,13 @@ function colorForKind(kind) {
 }
 
 async function search(query) {
-  const data = await json(`/api/rank?query=${encodeURIComponent(query)}&limit=10`);
+  const [data, answer] = await Promise.all([
+    json(`/api/rank?query=${encodeURIComponent(query)}&limit=10`),
+    json(`/api/answer?query=${encodeURIComponent(query)}&depth=1&limit=40`),
+  ]);
   const results = document.querySelector("#results");
   results.innerHTML = "";
+  renderAnswer(answer);
   for (const result of data.results || []) {
     const item = document.createElement("li");
     item.textContent = `${result.node.qualified_name} ${result.score.toFixed(3)}`;
@@ -472,8 +476,42 @@ async function search(query) {
     });
     results.appendChild(item);
   }
-  if (data.results?.[0]?.node?.id) {
+  if (answer.context?.target?.id) {
+    applyContextHighlight(answer.context, answer.context.target.id, {
+      answer: answer.answer,
+      target: answer.context.target,
+      evidence: answer.evidence || [],
+      context_summary: answer.context.summary,
+      edges: answer.context.edges || [],
+    });
+  } else if (data.results?.[0]?.node?.id) {
     await focusContext(data.results[0].node.id, data.results[0].node);
+  }
+}
+
+function renderAnswer(answer) {
+  const answerBox = document.querySelector("#answer");
+  const evidenceList = document.querySelector("#evidence");
+  answerBox.innerHTML = "";
+  evidenceList.innerHTML = "";
+
+  const body = document.createElement("div");
+  body.textContent = answer.answer || "No answer available.";
+  answerBox.appendChild(body);
+
+  const meta = document.createElement("div");
+  meta.className = "answer-meta";
+  meta.textContent = answer.llm_used
+    ? `LLM: ${answer.model || "configured model"}`
+    : `Fallback: ${answer.fallback_reason || "deterministic evidence answer"}`;
+  answerBox.appendChild(meta);
+
+  for (const item of answer.evidence || []) {
+    const entry = document.createElement("li");
+    const span = item.span ? `:${item.span.start_line}` : "";
+    entry.textContent = `${item.qualified_name} (${item.path}${span})`;
+    entry.addEventListener("click", () => focusContext(item.node_id, item));
+    evidenceList.appendChild(entry);
   }
 }
 
@@ -481,16 +519,20 @@ async function focusContext(nodeId, fallbackNode) {
   const context = await json(
     `/api/graph-context?node_id=${encodeURIComponent(nodeId)}&depth=1&limit=40`,
   );
-  graphState.selectedNodeId = nodeId;
-  graphState.highlightNodeIds = new Set((context.nodes || []).map((node) => node.id));
-  graphState.highlightEdgeKeys = new Set((context.edges || []).map(edgeKey));
-  document.querySelector("#detail").textContent = text({
+  applyContextHighlight(context, nodeId, {
     summary: context.summary,
     target: context.target || fallbackNode,
     incoming: context.incoming || [],
     outgoing: context.outgoing || [],
     edges: context.edges || [],
   });
+}
+
+function applyContextHighlight(context, selectedNodeId, detailPayload) {
+  graphState.highlightNodeIds = new Set((context.nodes || []).map((node) => node.id));
+  graphState.highlightEdgeKeys = new Set((context.edges || []).map(edgeKey));
+  graphState.selectedNodeId = selectedNodeId;
+  document.querySelector("#detail").textContent = text(detailPayload);
   drawGraph();
 }
 
@@ -568,6 +610,10 @@ function zoomGraph(factor, originX = 450, originY = 210) {
 }
 
 window.addEventListener("resize", drawGraph);
-loadSummary();
-loadGraph();
-search(document.querySelector("#query").value);
+
+async function init() {
+  await Promise.all([loadSummary(), loadGraph()]);
+  await search(document.querySelector("#query").value);
+}
+
+init();

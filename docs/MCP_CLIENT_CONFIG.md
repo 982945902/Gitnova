@@ -23,6 +23,9 @@ Tools:
 - `search_rank`
 - `graph_context`
 - `explain_node`
+- `answer_with_context`
+- `llm_explain_node`
+- `llm_impact_summary`
 - `explain_symbol`
 - `impact_analysis`
 - `impact`
@@ -32,6 +35,11 @@ Tools:
 - `stop_watch`
 - `diff_context`
 - `search_embeddings`
+
+Optional LLM explanation tools use an OpenAI-compatible provider configured via
+`GITNOVA_LLM_API_KEY`, `GITNOVA_LLM_BASE_URL`, and `GITNOVA_LLM_MODEL`. If the
+provider is not configured or fails, these tools return deterministic fallback
+answers with the same structured evidence.
 
 Resources:
 

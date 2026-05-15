@@ -46,3 +46,21 @@ gitnova serve
 For the product demo loop, use `rank-context` to find the most relevant code,
 then `graph-context` to return the focused node, source snippet, immediate
 relationships, and graph edges that the Web showcase can highlight.
+
+## Optional LLM Layer
+
+Gitnova's LLM support is an explanation layer over deterministic evidence.
+Indexing, ranking, graph context, impact analysis, MCP, and the dashboard still
+work without an API key. Configure an OpenAI-compatible chat completions
+provider only when you want natural-language wording:
+
+```bash
+GITNOVA_LLM_API_KEY=...
+GITNOVA_LLM_BASE_URL=https://api.openai.com/v1
+GITNOVA_LLM_MODEL=...
+```
+
+MCP tools such as `answer_with_context`, `llm_explain_node`, and
+`llm_impact_summary` always return structured `evidence` with node ids, paths,
+spans, qualified names, and source snippets. Without LLM config they return a
+deterministic fallback answer using the same evidence.

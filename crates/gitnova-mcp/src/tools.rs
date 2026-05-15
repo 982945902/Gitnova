@@ -2,6 +2,7 @@ use anyhow::Result;
 use gitnova_core::{build_graph_from_entries, query, scan_repository, CodeGraph};
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
+use gitnova_enrich::llm;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings};
 use gitnova_storage::{FileManifestEntry, GitnovaStore};
@@ -52,6 +53,9 @@ pub fn list_tools() -> Value {
             tool("search_rank", "Alias for rank_context with Web-friendly schema"),
             tool("graph_context", "Return a focused node neighborhood and relationship edges"),
             tool("explain_node", "Explain a node selected by id, symbol, or query"),
+            tool("answer_with_context", "Answer a question using ranked graph evidence and optional LLM explanation"),
+            tool("llm_explain_node", "Explain a node using graph evidence and optional LLM wording"),
+            tool("llm_impact_summary", "Summarize symbol impact using graph evidence and optional LLM wording"),
             tool("explain_symbol", "Explain a symbol and its graph neighborhood"),
             tool("impact_analysis", "Find reverse dependencies for a symbol"),
             tool("impact", "Alias for impact_analysis with node/query selectors"),
@@ -116,6 +120,26 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
             let selector = selector_from_arguments(arguments, &graph);
             json!(query::graph_context(&graph, &selector, depth, limit))
+        }
+        "answer_with_context" => {
+            let query_text = arguments.get("query").and_then(Value::as_str).unwrap_or("");
+            let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
+            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
+            json!(llm::answer_with_context(&graph, query_text, depth, limit))
+        }
+        "llm_explain_node" => {
+            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
+            let selector = selector_from_arguments(arguments, &graph);
+            let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
+            json!(llm::llm_explain_node(&graph, &selector, depth, limit))
+        }
+        "llm_impact_summary" => {
+            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
+            let selector = selector_from_arguments(arguments, &graph);
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+            json!(llm::llm_impact_summary(&graph, &selector, limit))
         }
         "explain_node" => {
             let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
