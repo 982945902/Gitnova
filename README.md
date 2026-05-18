@@ -1,7 +1,7 @@
 # Gitnova
 
 Gitnova is a local-first MCP code intelligence system for Rust, TypeScript,
-JavaScript, and Python repositories. It scans source files with `.gitignore`
+JavaScript, Python, and C++ repositories. It scans source files with `.gitignore`
 support, parses with tree-sitter, stores a graph in SQLite, ranks context by
 architectural salience, and exposes the graph through a CLI, rmcp-backed MCP
 stdio server, and local dashboard.

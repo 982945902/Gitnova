@@ -53,6 +53,7 @@ pub fn detect_language_servers() -> Vec<LspStatus> {
         "rust-analyzer",
         "typescript-language-server",
         "pyright-langserver",
+        "clangd",
     ]
     .into_iter()
     .map(|tool| LspStatus {
@@ -265,6 +266,18 @@ pub fn discover_lsp_probe_configs(
         configs.push(LspProbeConfig {
             tool: "pyright-langserver".into(),
             args: vec!["--stdio".into()],
+            timeout: DEFAULT_LSP_TIMEOUT,
+        });
+    }
+    if languages.contains(&gitnova_core::Language::Cpp)
+        && available.contains("clangd")
+        && ["compile_commands.json", "CMakeLists.txt", "meson.build"]
+            .iter()
+            .any(|file| root.join(file).exists())
+    {
+        configs.push(LspProbeConfig {
+            tool: "clangd".into(),
+            args: Vec::new(),
             timeout: DEFAULT_LSP_TIMEOUT,
         });
     }
@@ -597,11 +610,7 @@ mod tests {
     #[test]
     fn missing_lsp_tools_are_status_not_errors() {
         let statuses = detect_language_servers();
-        assert_eq!(statuses.len(), 3);
-    }
-
-    #[test]
-    fn lsp_metadata_is_attached_without_requiring_tools() {
+        assert_eq!(statuses.len(), 4);
         let mut graph = gitnova_core::CodeGraph::empty("repo".into());
         graph.nodes.push(gitnova_core::Node {
             id: "repo".into(),
@@ -616,7 +625,7 @@ mod tests {
             metrics: gitnova_core::NodeMetrics::default(),
         });
         let statuses = apply_lsp_metadata(&mut graph);
-        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses.len(), 4);
         assert!(graph.nodes[0]
             .tags
             .iter()

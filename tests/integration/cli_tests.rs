@@ -303,3 +303,73 @@ fn incremental_update_reports_skips_changes_and_deletes() {
     let deleted: Value = serde_json::from_slice(&deleted).unwrap();
     assert!(deleted["deleted"].as_u64().unwrap() >= 1);
 }
+
+#[test]
+fn cpp_fixture_indexes_and_ranks_with_utility_downranking() {
+    let (_temp, repo) = temp_fixture("cpp_sample");
+
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let stats = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["stats", "--repo", repo.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stats: Value = serde_json::from_slice(&stats).unwrap();
+    assert_eq!(stats["files"].as_u64().unwrap(), 4);
+    assert!(stats["languages"]["cpp"].as_u64().unwrap() >= 3);
+
+    // Auth query should rank AuthService above utils
+    let auth = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args([
+            "rank-context",
+            "change auth session validation",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--limit",
+            "3",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let auth: Value = serde_json::from_slice(&auth).unwrap();
+    let auth_names = serde_json::to_string(&auth["results"]).unwrap();
+    assert!(auth_names.contains("AuthService") || auth_names.contains("validateSession"));
+    // formatDate (utility) should not be top result for auth query
+    assert!(!auth["results"][0]["node"]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("formatDate"));
+
+    // Utility query should promote formatDate
+    let util = Command::cargo_bin("gitnova")
+        .unwrap()
+        .args([
+            "rank-context",
+            "formatDate utility",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--limit",
+            "3",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let util: Value = serde_json::from_slice(&util).unwrap();
+    assert!(util["results"][0]["node"]["qualified_name"]
+        .as_str()
+        .unwrap()
+        .contains("formatDate"));
+}

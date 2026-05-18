@@ -67,6 +67,7 @@ fn tree_sitter_language(language: Language) -> tree_sitter::Language {
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
     }
 }
 

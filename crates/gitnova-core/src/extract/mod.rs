@@ -1,3 +1,4 @@
+pub mod cpp;
 pub mod javascript;
 pub mod python;
 pub mod rust;
@@ -40,6 +41,7 @@ pub fn extract_file(parsed: &ParsedFile) -> FileExtraction {
         Language::TypeScript => typescript::extract(parsed),
         Language::JavaScript => javascript::extract(parsed),
         Language::Python => python::extract(parsed),
+        Language::Cpp => cpp::extract(parsed),
     }
 }
 
