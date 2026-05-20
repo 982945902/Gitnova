@@ -227,6 +227,7 @@ fn push_syntax_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: vec!["tree-sitter".into()],
+        base_classes: Vec::new(),
     });
 }
 
@@ -275,6 +276,7 @@ fn push_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: Vec::new(),
+        base_classes: Vec::new(),
     });
 }
 

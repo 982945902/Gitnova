@@ -82,6 +82,7 @@ pub enum EdgeKind {
     Imports,
     Calls,
     References,
+    Extends,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]

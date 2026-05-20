@@ -126,6 +126,10 @@ fn walk_node(
             if let Some(name) = child_name(node, source) {
                 let qualified = build_namespace_qualified(namespaces, &name);
                 push_syntax_symbol(symbols, NodeKind::Class, path, node, &name, &qualified);
+                let base_classes = extract_base_classes(node, source);
+                if let Some(sym) = symbols.last_mut() {
+                    sym.base_classes = base_classes;
+                }
                 class_for_children = Some(name);
             }
         }
@@ -133,18 +137,23 @@ fn walk_node(
             if let Some(name) = child_name(node, source) {
                 let qualified = build_namespace_qualified(namespaces, &name);
                 push_syntax_symbol(symbols, NodeKind::Struct, path, node, &name, &qualified);
+                let base_classes = extract_base_classes(node, source);
+                if let Some(sym) = symbols.last_mut() {
+                    sym.base_classes = base_classes;
+                }
                 class_for_children = Some(name);
             }
         }
         "function_definition" => {
-            if let Some(name) = extract_function_name(node, source) {
-                let kind = if current_class.is_some() {
+            if let Some((name, class_from_declarator)) = extract_function_name(node, source) {
+                let effective_class = class_from_declarator.or(current_class.clone());
+                let kind = if effective_class.is_some() {
                     NodeKind::Method
                 } else {
                     NodeKind::Function
                 };
                 let mut parts: Vec<&str> = namespaces.iter().map(String::as_str).collect();
-                if let Some(ref class) = current_class {
+                if let Some(ref class) = effective_class {
                     parts.push(class);
                 }
                 let qualified = if parts.is_empty() {
@@ -182,19 +191,25 @@ fn walk_node(
     }
 }
 
-fn extract_function_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn extract_function_name(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
     let declarator = node.child_by_field_name("declarator")?;
     drill_declarator(declarator, source)
 }
 
-fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
     match node.kind() {
-        "identifier" | "field_identifier" => node.utf8_text(source).ok().map(|s| s.to_string()),
+        "identifier" | "field_identifier" => {
+            let text = node.utf8_text(source).ok()?;
+            Some((text.to_string(), None))
+        }
         "qualified_identifier" => {
             let text = node.utf8_text(source).ok()?;
-            text.split("::").last().map(|s| s.to_string())
+            let mut parts: Vec<&str> = text.split("::").collect();
+            let name = parts.pop()?.to_string();
+            let class_prefix = parts.pop().map(|s| s.to_string());
+            Some((name, class_prefix))
         }
-        "destructor_name" => Some(node.utf8_text(source).ok()?.to_string()),
+        "destructor_name" => Some((node.utf8_text(source).ok()?.to_string(), None)),
         "function_declarator"
         | "pointer_declarator"
         | "reference_declarator"
@@ -207,7 +222,7 @@ fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<String> {
             .and_then(|child| drill_declarator(child, source)),
         "operator_name" => {
             let text = node.utf8_text(source).ok()?;
-            Some(format!("operator{}", text.trim_start_matches("operator")))
+            Some((format!("operator{}", text.trim_start_matches("operator")), None))
         }
         _ => None,
     }
@@ -219,6 +234,22 @@ fn child_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn extract_base_classes(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut base_classes = Vec::new();
+    if let Some(base_clause) = node.child_by_field_name("base_class_clause") {
+        for i in 0..base_clause.named_child_count() {
+            if let Some(child) = base_clause.named_child(i) {
+                if child.kind() == "type_identifier" {
+                    if let Ok(name) = child.utf8_text(source) {
+                        base_classes.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    base_classes
 }
 
 fn push_syntax_symbol(
@@ -238,6 +269,7 @@ fn push_syntax_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: vec!["tree-sitter".into()],
+        base_classes: Vec::new(),
     });
 }
 
@@ -262,6 +294,15 @@ fn merge_symbols(
         let key = (symbol.kind.clone(), symbol.qualified_name.clone());
         if seen.insert(key) {
             merged.push(symbol);
+        } else if let Some(existing) = merged.iter_mut().find(|s| {
+            s.path == symbol.path
+                && s.name == symbol.name
+                && s.kind == symbol.kind
+                && s.span.start_line == symbol.span.start_line
+        }) {
+            if symbol.qualified_name.len() < existing.qualified_name.len() {
+                *existing = symbol;
+            }
         }
     }
     merged.sort_by_key(|symbol| (symbol.span.start_line, symbol.span.start_col));
@@ -286,6 +327,7 @@ fn push_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: Vec::new(),
+        base_classes: Vec::new(),
     });
 }
 
