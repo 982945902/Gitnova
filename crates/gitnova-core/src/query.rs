@@ -83,6 +83,14 @@ pub fn summarize(graph: &CodeGraph) -> GraphSummary {
         }
     }
     let mut hubs: Vec<_> = graph.nodes.iter().map(digest).collect();
+    let generic_names: &[&str] = &[
+        "size", "c_str", "begin", "end", "empty", "Init",
+        "clear", "get", "set", "push_back", "pop_back",
+        "length", "data", "reset", "find", "insert",
+    ];
+    hubs.retain(|node| {
+        !(generic_names.contains(&node.name.as_str()) && node.in_degree > 100)
+    });
     hubs.sort_by_key(|node| std::cmp::Reverse(node.in_degree + node.out_degree));
     hubs.truncate(10);
     let mut recent_churn: Vec<_> = graph.nodes.iter().map(digest).collect();
@@ -351,6 +359,14 @@ pub fn architecture_map(graph: &CodeGraph, focus: Option<&str>) -> ArchitectureM
         }
     }
     for area in areas.values_mut() {
+        let generic_method_names: &[&str] = &[
+            "size", "c_str", "begin", "end", "empty", "Init",
+            "clear", "get", "set", "push_back", "pop_back",
+            "length", "data", "reset", "find", "insert",
+        ];
+        area.top_symbols.retain(|node| {
+            !(generic_method_names.contains(&node.name.as_str()) && node.in_degree > 100)
+        });
         area.top_symbols
             .sort_by_key(|node| std::cmp::Reverse(node.in_degree + node.out_degree));
         area.top_symbols.truncate(5);
