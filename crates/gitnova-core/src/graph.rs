@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::extract::{extract_file, ExtractedSymbol};
 use crate::language::is_test_path;
 use crate::model::{
-    current_unix, CodeGraph, Edge, EdgeKind, Node, NodeId, NodeKind, NodeMetrics, Span,
+    current_unix, CodeGraph, Edge, EdgeKind, Language, Node, NodeId, NodeKind, NodeMetrics, Span,
 };
 use crate::parser::parse_source_file;
 use crate::scan::{scan_repository, SourceFile};
@@ -75,43 +75,47 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
             10_000,
         );
 
-        let module_name = module_name_for(&file.relative_path);
-        let module_id = stable_id("module", &file.relative_path, &module_name, None);
-        graph.nodes.push(Node {
-            id: module_id.clone(),
-            kind: NodeKind::Module,
-            name: module_name
-                .split("::")
-                .last()
-                .unwrap_or(&module_name)
-                .to_string(),
-            qualified_name: module_name,
-            path: file.relative_path.clone(),
-            span: None,
-            language: Some(file.language),
-            text: String::new(),
-            tags: vec!["module".into(), file.language.as_str().to_string()],
-            metrics: NodeMetrics {
-                is_test: is_test_path(&file.relative_path),
-                ..NodeMetrics::default()
-            },
-        });
-        add_edge(
-            &mut graph.edges,
-            &mut edge_set,
-            &file_id,
-            &module_id,
-            EdgeKind::Defines,
-            9_000,
-        );
-        add_edge(
-            &mut graph.edges,
-            &mut edge_set,
-            &file_id,
-            &module_id,
-            EdgeKind::Contains,
-            9_000,
-        );
+        // Only create path-based module nodes for non-C++ files.
+        // C++ uses namespace-based module nodes from the extractor instead.
+        if file.language != Language::Cpp {
+            let module_name = module_name_for(&file.relative_path);
+            let module_id = stable_id("module", &file.relative_path, &module_name, None);
+            graph.nodes.push(Node {
+                id: module_id.clone(),
+                kind: NodeKind::Module,
+                name: module_name
+                    .split("::")
+                    .last()
+                    .unwrap_or(&module_name)
+                    .to_string(),
+                qualified_name: module_name,
+                path: file.relative_path.clone(),
+                span: None,
+                language: Some(file.language),
+                text: String::new(),
+                tags: vec!["module".into(), file.language.as_str().to_string()],
+                metrics: NodeMetrics {
+                    is_test: is_test_path(&file.relative_path),
+                    ..NodeMetrics::default()
+                },
+            });
+            add_edge(
+                &mut graph.edges,
+                &mut edge_set,
+                &file_id,
+                &module_id,
+                EdgeKind::Defines,
+                9_000,
+            );
+            add_edge(
+                &mut graph.edges,
+                &mut edge_set,
+                &file_id,
+                &module_id,
+                EdgeKind::Contains,
+                9_000,
+            );
+        }
 
         let parsed = parse_source_file(file)?;
         let extraction = extract_file(&parsed);
@@ -222,8 +226,63 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
         }
     }
 
+    // Deduplicate nodes: keep the shortest qualified_name for each (path, name, kind) group
+    deduplicate_nodes(&mut graph.nodes, &mut graph.edges);
+
     recompute_degrees(&mut graph);
     Ok(graph)
+}
+
+fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
+    // Group nodes by (path, name, kind)
+    let mut groups: HashMap<(String, String, NodeKind), Vec<usize>> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        let key = (node.path.clone(), node.name.clone(), node.kind.clone());
+        groups.entry(key).or_default().push(i);
+    }
+
+    // Build mapping from removed ID to kept ID
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    let mut to_remove = Vec::new();
+
+    for indices in groups.values() {
+        if indices.len() <= 1 {
+            continue;
+        }
+        // Keep the one with shortest qualified_name
+        let keep_idx = indices
+            .iter()
+            .min_by_key(|&&i| nodes[i].qualified_name.len())
+            .copied()
+            .unwrap();
+        let keep_id = nodes[keep_idx].id.clone();
+        for &i in indices {
+            if i != keep_idx {
+                id_map.insert(nodes[i].id.clone(), keep_id.clone());
+                to_remove.push(i);
+            }
+        }
+    }
+
+    // Rewrite edges
+    for edge in edges.iter_mut() {
+        if let Some(new_id) = id_map.get(&edge.from) {
+            edge.from = new_id.clone();
+        }
+        if let Some(new_id) = id_map.get(&edge.to) {
+            edge.to = new_id.clone();
+        }
+    }
+
+    // Remove duplicate nodes (in reverse order to preserve indices)
+    to_remove.sort_unstable_by(|a, b| b.cmp(a));
+    for i in to_remove {
+        nodes.remove(i);
+    }
+
+    // Deduplicate edges that may now be identical
+    let mut seen_edges: HashSet<(String, String, EdgeKind)> = HashSet::new();
+    edges.retain(|edge| seen_edges.insert((edge.from.clone(), edge.to.clone(), edge.kind.clone())));
 }
 
 fn module_name_for(path: &str) -> String {
@@ -244,7 +303,7 @@ fn push_symbol_node(graph: &mut CodeGraph, file: &SourceFile, symbol: &Extracted
         id: id.clone(),
         kind: symbol.kind.clone(),
         name: symbol.name.clone(),
-        qualified_name: if symbol.qualified_name.contains("::") {
+        qualified_name: if symbol.qualified_name.contains("::") || symbol.kind == NodeKind::Module {
             symbol.qualified_name.clone()
         } else {
             format!("{}::{}", symbol.path, symbol.qualified_name)
