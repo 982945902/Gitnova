@@ -176,6 +176,20 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
                     .or_default()
                     .push(node_id.clone());
             }
+            for base in &symbol.base_classes {
+                if let Some(targets) = symbol_by_name.get(base) {
+                    for target in targets.iter().take(2) {
+                        add_edge(
+                            &mut graph.edges,
+                            &mut edge_set,
+                            &node_id,
+                            target,
+                            EdgeKind::Extends,
+                            9_000,
+                        );
+                    }
+                }
+            }
             calls.push((node_id, symbol.calls));
         }
     }

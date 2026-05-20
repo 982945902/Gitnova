@@ -181,7 +181,7 @@ pub fn impact_analysis(graph: &CodeGraph, symbol: &str, limit: usize) -> ImpactA
             edge.to == current
                 && matches!(
                     edge.kind,
-                    EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports | EdgeKind::Defines
+                    EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports | EdgeKind::Defines | EdgeKind::Extends
                 )
         }) {
             if seen.insert(edge.from.clone()) {
