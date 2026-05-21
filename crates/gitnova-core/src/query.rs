@@ -456,6 +456,11 @@ impl NodeKindLabel for Node {
             NodeKind::Method => "method",
             NodeKind::Class => "class",
             NodeKind::Struct => "struct",
+            NodeKind::Enum => "enum",
+            NodeKind::Union => "union",
+            NodeKind::Typedef => "typedef",
+            NodeKind::Variable => "variable",
+            NodeKind::Macro => "macro",
             NodeKind::Trait => "trait",
             NodeKind::Interface => "interface",
             NodeKind::Import => "import",
@@ -469,8 +474,17 @@ fn node_summary(node: &Node, incoming: &[NodeDigest], outgoing: &[NodeDigest]) -
         NodeKind::Function | NodeKind::Method => {
             format!("implements {} behavior", humanize_identifier(&node.name))
         }
-        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface => {
+        NodeKind::Class | NodeKind::Struct | NodeKind::Enum | NodeKind::Union | NodeKind::Trait | NodeKind::Interface => {
             format!("models {}", humanize_identifier(&node.name))
+        }
+        NodeKind::Variable => {
+            format!("stores {}", humanize_identifier(&node.name))
+        }
+        NodeKind::Typedef => {
+            format!("aliases type {}", humanize_identifier(&node.name))
+        }
+        NodeKind::Macro => {
+            format!("defines macro {}", humanize_identifier(&node.name))
         }
         NodeKind::File => "groups source code in this file".to_string(),
         NodeKind::Module => "groups module-level code".to_string(),

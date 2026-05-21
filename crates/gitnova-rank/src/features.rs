@@ -86,6 +86,11 @@ pub fn domain_specificity(query_tokens: &[String], node: &Node) -> f64 {
         | NodeKind::Method
         | NodeKind::Class
         | NodeKind::Struct
+        | NodeKind::Enum
+        | NodeKind::Union
+        | NodeKind::Typedef
+        | NodeKind::Variable
+        | NodeKind::Macro
         | NodeKind::Trait
         | NodeKind::Interface => 0.2,
         _ => 0.0,

@@ -3,7 +3,7 @@ use crate::model::{NodeKind, Span};
 use crate::parser::{line_span, ParsedFile};
 use regex::Regex;
 use std::collections::HashSet;
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, StreamingIterator};
 
 pub fn extract(parsed: &ParsedFile) -> FileExtraction {
     let mut heuristic = extract_heuristic(parsed);
@@ -94,15 +94,118 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
     let language = tree_sitter_cpp::LANGUAGE.into();
     parser.set_language(&language).ok()?;
     let tree = parser.parse(&parsed.text, None)?;
+    let source = parsed.text.as_bytes();
+    let path = &parsed.source.relative_path;
+
+    let query = tree_sitter::Query::new(&language, include_str!("cpp_queries.scm")).ok()?;
+    let mut cursor = tree_sitter::QueryCursor::new();
     let mut symbols = Vec::new();
-    walk_node(
-        tree.root_node(),
-        parsed.text.as_bytes(),
-        &parsed.source.relative_path,
-        &[],
-        None,
-        &mut symbols,
-    );
+
+    let mut matches = cursor.matches(&query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        if m.captures.is_empty() {
+            continue;
+        }
+
+        // Collect capture names and nodes for this match
+        let mut name_text: Option<String> = None;
+        let mut def_node: Option<Node> = None;
+        let mut def_capture_name: Option<&str> = None;
+        let mut qname_node: Option<Node> = None;
+
+        for cap in m.captures {
+            let cap_name = query.capture_names()[cap.index as usize];
+            match cap_name {
+                "name" => {
+                    if let Ok(text) = cap.node.utf8_text(source) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            name_text = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                "qname" => {
+                    qname_node = Some(cap.node);
+                }
+                cn if cn.starts_with("def.") => {
+                    def_node = Some(cap.node);
+                    def_capture_name = Some(cn);
+                }
+                _ => {}
+            }
+        }
+
+        // For out-of-line function definitions, extract name + class from qname
+        let mut class_prefix: Option<String> = None;
+        if def_capture_name == Some("def.function_outline") {
+            if let Some(qn) = qname_node {
+                if let Ok(text) = qn.utf8_text(source) {
+                    let mut parts: Vec<&str> = text.split("::").collect();
+                    if parts.len() >= 2 {
+                        name_text = parts.pop().map(|s| s.to_string());
+                        class_prefix = parts.pop().map(|s| s.to_string());
+                    }
+                }
+            }
+        }
+
+        let name = match name_text {
+            Some(n) => n,
+            None => continue,
+        };
+        let def_node = match def_node {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Determine NodeKind
+        let kind = match def_capture_name {
+            Some("def.class") => NodeKind::Class,
+            Some("def.struct") => NodeKind::Struct,
+            Some("def.enum") => NodeKind::Enum,
+            Some("def.enum_value") => NodeKind::Variable,
+            Some("def.union") => NodeKind::Union,
+            Some("def.typedef") => NodeKind::Typedef,
+            Some("def.variable") => NodeKind::Variable,
+            Some("def.macro") => NodeKind::Macro,
+            Some("def.label") => NodeKind::Variable,
+            Some("def.function") => NodeKind::Function,
+            Some("def.method") => NodeKind::Method,
+            Some("def.function_outline") => {
+                // Out-of-line: method if has class prefix, else function
+                if class_prefix.is_some() {
+                    NodeKind::Method
+                } else {
+                    NodeKind::Function
+                }
+            }
+            Some("def.namespace") => NodeKind::Module,
+            _ => continue,
+        };
+
+        // Build qualified name from enclosing namespace + class chain
+        let qualified = build_qualified_from_enclosing(def_node, source, &name, &kind, class_prefix.as_deref());
+
+        // Extract base classes for class/struct
+        let base_classes = if matches!(kind, NodeKind::Class | NodeKind::Struct) {
+            extract_base_classes(def_node, source)
+        } else {
+            Vec::new()
+        };
+
+        symbols.push(ExtractedSymbol {
+            kind,
+            name: name.clone(),
+            qualified_name: qualified,
+            path: path.to_string(),
+            span: span_from_node(def_node),
+            text: String::new(),
+            calls: Vec::new(),      // filled later by fill_symbol_text_and_calls
+            tags: vec!["tree-sitter".into(), "query".into()],
+            base_classes,
+        });
+    }
+
     if symbols.is_empty() {
         None
     } else {
@@ -110,121 +213,63 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
     }
 }
 
-fn walk_node(
+/// Build qualified name from the enclosing namespace/class chain above a node.
+fn build_qualified_from_enclosing(
     node: Node<'_>,
     source: &[u8],
-    path: &str,
-    namespaces: &[String],
-    current_class: Option<String>,
-    symbols: &mut Vec<ExtractedSymbol>,
-) {
-    let mut class_for_children = current_class.clone();
-    let mut namespaces_for_children = namespaces.to_vec();
+    name: &str,
+    kind: &NodeKind,
+    class_from_qname: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = node;
 
-    match node.kind() {
-        "class_specifier" => {
-            if let Some(name) = child_name(node, source) {
-                let qualified = build_namespace_qualified(namespaces, &name);
-                let base_classes = extract_base_classes(node, source);
-                push_syntax_symbol(symbols, NodeKind::Class, path, node, &name, &qualified);
-                if let Some(sym) = symbols.last_mut() {
-                    sym.base_classes = base_classes;
+    // Walk up parent chain collecting namespace and class names
+    loop {
+        if let Some(parent) = cur.parent() {
+            match parent.kind() {
+                "namespace_definition" => {
+                    if let Some(ns) = child_name(parent, source) {
+                        parts.push(ns);
+                    }
                 }
-                class_for_children = Some(name);
-            }
-        }
-        "struct_specifier" => {
-            if let Some(name) = child_name(node, source) {
-                let qualified = build_namespace_qualified(namespaces, &name);
-                let base_classes = extract_base_classes(node, source);
-                push_syntax_symbol(symbols, NodeKind::Struct, path, node, &name, &qualified);
-                if let Some(sym) = symbols.last_mut() {
-                    sym.base_classes = base_classes;
+                "class_specifier" | "struct_specifier" => {
+                    if let Some(cls) = child_name(parent, source) {
+                        // Don't add the current node's own class name if
+                        // the node itself IS the class/struct specifier
+                        if node.kind() != "class_specifier" && node.kind() != "struct_specifier" {
+                            parts.push(cls);
+                        }
+                    }
                 }
-                class_for_children = Some(name);
-            }
-        }
-        "function_definition" => {
-            if let Some((name, class_from_declarator)) = extract_function_name(node, source) {
-                let effective_class = class_from_declarator.or(current_class.clone());
-                let kind: NodeKind = if effective_class.is_some() {
-                    NodeKind::Method
-                } else {
-                    NodeKind::Function
-                };
-                let mut parts: Vec<&str> = namespaces.iter().map(String::as_str).collect();
-                if let Some(ref class) = effective_class {
-                    parts.push(class);
+                "template_declaration" => {
+                    // Pass-through: class/struct may be inside template
                 }
-                let qualified = if parts.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}::{}", parts.join("::"), name)
-                };
-                push_syntax_symbol(symbols, kind, path, node, &name, &qualified);
+                "translation_unit" => break,
+                _ => {}
             }
+            cur = parent;
+        } else {
+            break;
         }
-        "namespace_definition" => {
-            if let Some(name) = child_name(node, source) {
-                let qualified = build_namespace_qualified(namespaces, &name);
-                push_syntax_symbol(symbols, NodeKind::Module, path, node, &name, &qualified);
-                namespaces_for_children.push(name);
-            }
-        }
-        "template_declaration" => {
-            // Pass-through: recurse into children to extract the inner declaration
-        }
-        _ => {}
     }
 
-    for index in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(index) {
-            walk_node(
-                child,
-                source,
-                path,
-                &namespaces_for_children,
-                class_for_children.clone(),
-                symbols,
-            );
-        }
+    parts.reverse();
+
+    // For out-of-line methods, add the class prefix from the qname
+    if let Some(cls) = class_from_qname {
+        parts.push(cls.to_string());
     }
-}
 
-fn extract_function_name(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
-    let declarator = node.child_by_field_name("declarator")?;
-    drill_declarator(declarator, source)
-}
+    // Only add the name itself if it's not a module (namespace)
+    if !matches!(kind, NodeKind::Module) {
+        parts.push(name.to_string());
+    }
 
-fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
-    match node.kind() {
-        "identifier" | "field_identifier" => {
-            let text = node.utf8_text(source).ok()?;
-            Some((text.to_string(), None))
-        }
-        "qualified_identifier" => {
-            let text = node.utf8_text(source).ok()?;
-            let mut parts: Vec<&str> = text.split("::").collect();
-            let name = parts.pop()?.to_string();
-            let class_prefix = parts.pop().map(|s| s.to_string());
-            Some((name, class_prefix))
-        }
-        "destructor_name" => Some((node.utf8_text(source).ok()?.to_string(), None)),
-        "function_declarator"
-        | "pointer_declarator"
-        | "reference_declarator"
-        | "parenthesized_declarator"
-        | "array_declarator" => node
-            .child_by_field_name("declarator")
-            .and_then(|child| drill_declarator(child, source)),
-        "template_function" => node
-            .child_by_field_name("declarator")
-            .and_then(|child| drill_declarator(child, source)),
-        "operator_name" => {
-            let text = node.utf8_text(source).ok()?;
-            Some((format!("operator{}", text.trim_start_matches("operator")), None))
-        }
-        _ => None,
+    if parts.is_empty() {
+        name.to_string()
+    } else {
+        parts.join("::")
     }
 }
 
@@ -255,27 +300,6 @@ fn extract_base_classes(node: Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     base_classes
-}
-
-fn push_syntax_symbol(
-    symbols: &mut Vec<ExtractedSymbol>,
-    kind: NodeKind,
-    path: &str,
-    node: Node<'_>,
-    name: &str,
-    qualified_name: &str,
-) {
-    symbols.push(ExtractedSymbol {
-        kind,
-        name: name.to_string(),
-        qualified_name: qualified_name.to_string(),
-        path: path.to_string(),
-        span: span_from_node(node),
-        text: String::new(),
-        calls: Vec::new(),
-        tags: vec!["tree-sitter".into()],
-        base_classes: Vec::new(),
-    });
 }
 
 fn span_from_node(node: Node<'_>) -> Span {
@@ -532,6 +556,7 @@ void BuildWorkItem::doProcess() {}
                     && node.kind == NodeKind::Method
             })
             .expect("out-of-line method should have class-qualified name and Method kind");
+        assert_eq!(method.kind, NodeKind::Method);
 
         // Inheritance edge should exist
         let extends_edges: Vec<_> = graph

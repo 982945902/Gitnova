@@ -61,7 +61,11 @@ fn fill_symbol_text_and_calls(symbols: &mut [ExtractedSymbol], source: &str) {
         .map(|symbol| symbol.span.start_line)
         .collect();
     for (index, symbol) in symbols.iter_mut().enumerate() {
-        let next_start = starts.get(index + 1).copied();
+        // Skip same-line symbols when finding the next start line
+        let next_start = starts[index + 1..]
+            .iter()
+            .copied()
+            .find(|&s| s > symbol.span.start_line);
         let text = symbol_text(&lines, symbol.span.start_line, next_start);
         let calls = calls_in_text(&text, &symbol.name);
         symbol.text = text;

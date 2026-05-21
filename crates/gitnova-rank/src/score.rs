@@ -127,8 +127,8 @@ fn score_node(
     let utility_penalty = features::utility_penalty(node, overlap);
     let test_penalty = if node.metrics.is_test { 1.0 } else { 0.0 };
     let kind_bias = match node.kind {
-        NodeKind::Function | NodeKind::Method => 0.08,
-        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface => 0.05,
+        NodeKind::Function | NodeKind::Method | NodeKind::Variable | NodeKind::Macro => 0.08,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Enum | NodeKind::Union | NodeKind::Typedef | NodeKind::Trait | NodeKind::Interface => 0.05,
         NodeKind::Module => -0.15,
         NodeKind::File => -0.02,
         _ => 0.0,

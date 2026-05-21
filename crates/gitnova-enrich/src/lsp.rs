@@ -146,6 +146,11 @@ pub fn probe_lsp_graph_with_timeout(
                 | gitnova_core::NodeKind::Method
                 | gitnova_core::NodeKind::Class
                 | gitnova_core::NodeKind::Struct
+                | gitnova_core::NodeKind::Enum
+                | gitnova_core::NodeKind::Union
+                | gitnova_core::NodeKind::Typedef
+                | gitnova_core::NodeKind::Variable
+                | gitnova_core::NodeKind::Macro
                 | gitnova_core::NodeKind::Trait
                 | gitnova_core::NodeKind::Interface
         ) && node.span.is_some()
