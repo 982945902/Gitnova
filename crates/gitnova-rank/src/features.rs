@@ -104,10 +104,16 @@ pub fn churn(node: &Node) -> f64 {
 
 pub fn hub_penalty(node: &Node) -> f64 {
     let degree = node.metrics.in_degree + node.metrics.out_degree;
-    if degree <= 4 {
+    let base = if degree <= 4 {
         0.0
     } else {
         ((degree - 4) as f64 / 12.0).min(1.0)
+    };
+    // Macro and variable nodes are globally referenced, apply extra penalty
+    if matches!(node.kind, NodeKind::Macro | NodeKind::Variable) {
+        (base + 0.3).min(1.0)
+    } else {
+        base
     }
 }
 
@@ -133,6 +139,14 @@ pub fn utility_penalty(node: &Node, overlap: f64) -> f64 {
     ];
     let is_generic_method = generic_method_names.contains(&node.name.as_str())
         && node.metrics.in_degree > 20;
+
+    // Third-party library penalty: if the path contains third_party/ or thirdparty/,
+    // and query overlap is low, penalize heavily.
+    let is_third_party = node.path.to_ascii_lowercase().contains("third_party")
+        || node.path.to_ascii_lowercase().contains("thirdparty");
+    if is_third_party && overlap < 0.50 {
+        return 0.5;
+    }
 
     if !generic_path && !is_generic_method {
         return 0.0;

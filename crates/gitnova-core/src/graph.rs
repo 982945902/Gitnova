@@ -184,8 +184,12 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
             for base in &symbol.base_classes {
                 // Link to symbols with matching name in symbol_by_name.
                 // Base classes are referenced by short name (e.g. "BuildWorkItem").
+                // Prefer class/struct targets over typedef for extends edges.
                 if let Some(targets) = symbol_by_name.get(base) {
-                    for target in targets.iter().take(2) {
+                    let preferred = targets.iter().find(|t| {
+                        graph.node(t).map(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct)).unwrap_or(false)
+                    }).or_else(|| targets.first());
+                    if let Some(target) = preferred {
                         add_edge(
                             &mut graph.edges,
                             &mut edge_set,
@@ -286,6 +290,8 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
     // Pass 2: cross-file dedup. Group by (name, kind) across paths.
     // When one qname is a suffix of another (namespace pollution across files),
     // keep the longer (more qualified) one.
+    // Also handles namespace subsequence matching, e.g.
+    // "indexlib::index::Foo" and "indexlib::Foo" share the same name.
     let mut cross_groups: HashMap<(String, NodeKind), Vec<usize>> = HashMap::new();
     for (i, node) in nodes.iter().enumerate() {
         let key = (node.name.clone(), node.kind.clone());
@@ -309,7 +315,20 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
                 } else if qj.ends_with(&format!("::{}", qi)) {
                     (i, j)
                 } else {
-                    continue;
+                    // Check namespace subsequence: split both by "::" and see if the
+                    // shorter parts are a subsequence of the longer parts.
+                    let qi_parts: Vec<&str> = qi.split("::").collect();
+                    let qj_parts: Vec<&str> = qj.split("::").collect();
+                    let (short_parts, long_parts, short_idx, long_idx) = if qi_parts.len() < qj_parts.len() {
+                        (&qi_parts, &qj_parts, i, j)
+                    } else {
+                        (&qj_parts, &qi_parts, j, i)
+                    };
+                    if is_namespace_subsequence(short_parts, long_parts) {
+                        (short_idx, long_idx)
+                    } else {
+                        continue;
+                    }
                 };
                 let keep_id = nodes[keep_idx].id.clone();
                 if !id_map.contains_key(&nodes[remove_idx].id) {
@@ -346,6 +365,26 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
     edges.retain(|edge| {
         seen_edges.insert((edge.from.clone(), edge.to.clone(), edge.kind.clone()))
     });
+}
+
+fn is_namespace_subsequence(shorter: &[&str], longer: &[&str]) -> bool {
+    if shorter.is_empty() || longer.is_empty() {
+        return false;
+    }
+    if shorter.last() != longer.last() {
+        return false; // same name must match
+    }
+    let mut li = 0;
+    for s in shorter {
+        while li < longer.len() && longer[li] != *s {
+            li += 1;
+        }
+        if li >= longer.len() {
+            return false;
+        }
+        li += 1;
+    }
+    true
 }
 
 fn push_symbol_node(graph: &mut CodeGraph, file: &SourceFile, symbol: &ExtractedSymbol) -> NodeId {
