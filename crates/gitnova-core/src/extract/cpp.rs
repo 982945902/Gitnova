@@ -158,8 +158,13 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
             None => continue,
         };
 
+        // Filter C++ keywords and literals that tree-sitter misidentifies as identifiers
+        if is_cpp_keyword_or_literal(&name) {
+            continue;
+        }
+
         // Determine NodeKind
-        let kind = match def_capture_name {
+        let mut kind = match def_capture_name {
             Some("def.class") => NodeKind::Class,
             Some("def.struct") => NodeKind::Struct,
             Some("def.enum") => NodeKind::Enum,
@@ -169,22 +174,37 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
             Some("def.variable") => NodeKind::Variable,
             Some("def.macro") => NodeKind::Macro,
             Some("def.label") => NodeKind::Variable,
-            Some("def.function") => NodeKind::Function,
-            Some("def.method") => NodeKind::Method,
+            Some("def.namespace") => NodeKind::Module,
+            Some("def.function_decl") => {
+                // Determine function vs method based on enclosing class/struct
+                if enclosing_class(def_node, source).is_some() {
+                    NodeKind::Method
+                } else {
+                    NodeKind::Function
+                }
+            }
             Some("def.function_outline") => {
-                // Out-of-line: method if has class prefix, else function
+                // Out-of-line in .cpp: method if has class prefix, else function
                 if class_prefix.is_some() {
                     NodeKind::Method
                 } else {
                     NodeKind::Function
                 }
             }
-            Some("def.namespace") => NodeKind::Module,
             _ => continue,
         };
 
         // Build qualified name from enclosing namespace + class chain
-        let qualified = build_qualified_from_enclosing(def_node, source, &name, &kind, class_prefix.as_deref());
+        // For function_decl, use class_from_qname (out-of-line) or enclosing class (inline)
+        let class_for_qname = if class_prefix.is_some() {
+            class_prefix.as_deref()
+        } else if kind == NodeKind::Method {
+            // For inline methods, the enclosing class name is found during parent walk
+            None // build_qualified_from_enclosing will find it via parent chain
+        } else {
+            None
+        };
+        let qualified = build_qualified_from_enclosing(def_node, source, &name, &kind, class_for_qname);
 
         // Extract base classes for class/struct
         let base_classes = if matches!(kind, NodeKind::Class | NodeKind::Struct) {
@@ -211,6 +231,43 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
     } else {
         Some(symbols)
     }
+}
+
+/// Filter C++ keywords and literal values that tree-sitter captures as identifiers.
+fn is_cpp_keyword_or_literal(name: &str) -> bool {
+    matches!(
+        name,
+        "true" | "false" | "nullptr" | "NULL" | "this"
+            | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
+            | "return" | "break" | "continue" | "goto" | "throw"
+            | "class" | "struct" | "enum" | "union" | "namespace"
+            | "public" | "private" | "protected" | "virtual" | "static"
+            | "const" | "volatile" | "inline" | "explicit" | "friend"
+            | "template" | "typename" | "typedef"
+            | "new" | "delete" | "sizeof" | "typeid"
+            | "try" | "catch" | "noexcept" | "override" | "final"
+            | "auto" | "decltype" | "constexpr" | "consteval" | "constinit"
+    ) || name.starts_with("__") // compiler builtins
+}
+
+/// Walk parent chain to find enclosing class_specifier or struct_specifier.
+fn enclosing_class(mut node: Node<'_>, source: &[u8]) -> Option<String> {
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "class_specifier" | "struct_specifier" => {
+                return child_name(parent, source);
+            }
+            "function_definition" | "compound_statement" | "field_declaration_list" => {
+                // Keep walking up through these
+            }
+            "namespace_definition" | "translation_unit" => {
+                return None;
+            }
+            _ => {}
+        }
+        node = parent;
+    }
+    None
 }
 
 /// Build qualified name from the enclosing namespace/class chain above a node.
