@@ -41,11 +41,6 @@
   declarator: (function_declarator
     [(identifier) (field_identifier)] @name)) @def.function_decl
 
-;; Form B: function_declarator as direct named child (no declarator field)
-(function_definition
-  (function_declarator
-    [(identifier) (field_identifier)] @name)) @def.function_decl
-
 ;; Form C: out-of-line definition ClassName::methodName in .cpp
 (function_definition
   declarator: (function_declarator

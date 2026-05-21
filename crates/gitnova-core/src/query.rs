@@ -205,6 +205,22 @@ pub fn impact_analysis(graph: &CodeGraph, symbol: &str, limit: usize) -> ImpactA
                 break;
             }
         }
+        // Also follow extends edges forward (child -> parent) to include parent class impact
+        for edge in graph.edges.iter().filter(|e| {
+            e.from == current && e.kind == EdgeKind::Extends
+        }) {
+            if seen.insert(edge.to.clone()) {
+                if let Some(node) = by_id.get(edge.to.as_str()) {
+                    if node.kind != NodeKind::Import {
+                        impacted.push(digest(node));
+                    }
+                }
+                queue.push_back(edge.to.clone());
+            }
+            if impacted.len() >= limit {
+                break;
+            }
+        }
         if impacted.len() >= limit {
             break;
         }
