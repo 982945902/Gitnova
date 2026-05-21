@@ -125,26 +125,35 @@ fn walk_node(
         "class_specifier" => {
             if let Some(name) = child_name(node, source) {
                 let qualified = build_namespace_qualified(namespaces, &name);
+                let base_classes = extract_base_classes(node, source);
                 push_syntax_symbol(symbols, NodeKind::Class, path, node, &name, &qualified);
+                if let Some(sym) = symbols.last_mut() {
+                    sym.base_classes = base_classes;
+                }
                 class_for_children = Some(name);
             }
         }
         "struct_specifier" => {
             if let Some(name) = child_name(node, source) {
                 let qualified = build_namespace_qualified(namespaces, &name);
+                let base_classes = extract_base_classes(node, source);
                 push_syntax_symbol(symbols, NodeKind::Struct, path, node, &name, &qualified);
+                if let Some(sym) = symbols.last_mut() {
+                    sym.base_classes = base_classes;
+                }
                 class_for_children = Some(name);
             }
         }
         "function_definition" => {
-            if let Some(name) = extract_function_name(node, source) {
-                let kind = if current_class.is_some() {
+            if let Some((name, class_from_declarator)) = extract_function_name(node, source) {
+                let effective_class = class_from_declarator.or(current_class.clone());
+                let kind: NodeKind = if effective_class.is_some() {
                     NodeKind::Method
                 } else {
                     NodeKind::Function
                 };
                 let mut parts: Vec<&str> = namespaces.iter().map(String::as_str).collect();
-                if let Some(ref class) = current_class {
+                if let Some(ref class) = effective_class {
                     parts.push(class);
                 }
                 let qualified = if parts.is_empty() {
@@ -182,19 +191,25 @@ fn walk_node(
     }
 }
 
-fn extract_function_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn extract_function_name(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
     let declarator = node.child_by_field_name("declarator")?;
     drill_declarator(declarator, source)
 }
 
-fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
     match node.kind() {
-        "identifier" | "field_identifier" => node.utf8_text(source).ok().map(|s| s.to_string()),
+        "identifier" | "field_identifier" => {
+            let text = node.utf8_text(source).ok()?;
+            Some((text.to_string(), None))
+        }
         "qualified_identifier" => {
             let text = node.utf8_text(source).ok()?;
-            text.split("::").last().map(|s| s.to_string())
+            let mut parts: Vec<&str> = text.split("::").collect();
+            let name = parts.pop()?.to_string();
+            let class_prefix = parts.pop().map(|s| s.to_string());
+            Some((name, class_prefix))
         }
-        "destructor_name" => Some(node.utf8_text(source).ok()?.to_string()),
+        "destructor_name" => Some((node.utf8_text(source).ok()?.to_string(), None)),
         "function_declarator"
         | "pointer_declarator"
         | "reference_declarator"
@@ -207,7 +222,7 @@ fn drill_declarator(node: Node<'_>, source: &[u8]) -> Option<String> {
             .and_then(|child| drill_declarator(child, source)),
         "operator_name" => {
             let text = node.utf8_text(source).ok()?;
-            Some(format!("operator{}", text.trim_start_matches("operator")))
+            Some((format!("operator{}", text.trim_start_matches("operator")), None))
         }
         _ => None,
     }
@@ -219,6 +234,27 @@ fn child_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn extract_base_classes(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    // base_class_clause is a named child of class_specifier, not a field child
+    let base_clause = (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i))
+        .find(|child| child.kind() == "base_class_clause");
+    let Some(base_clause) = base_clause else {
+        return Vec::new();
+    };
+    let mut base_classes = Vec::new();
+    for i in 0..base_clause.named_child_count() {
+        if let Some(child) = base_clause.named_child(i) {
+            if child.kind() == "type_identifier" {
+                if let Ok(name) = child.utf8_text(source) {
+                    base_classes.push(name.to_string());
+                }
+            }
+        }
+    }
+    base_classes
 }
 
 fn push_syntax_symbol(
@@ -238,6 +274,7 @@ fn push_syntax_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: vec!["tree-sitter".into()],
+        base_classes: Vec::new(),
     });
 }
 
@@ -257,8 +294,25 @@ fn merge_symbols(
     heuristic_symbols: Vec<ExtractedSymbol>,
 ) -> Vec<ExtractedSymbol> {
     let mut seen = HashSet::new();
-    let mut merged = Vec::new();
+    let mut merged: Vec<ExtractedSymbol> = Vec::new();
     for symbol in syntax_symbols.into_iter().chain(heuristic_symbols) {
+        // When the same symbol (same path, name, kind, start_line) appears with
+        // different qualified_names (namespace pollution), keep the shortest one.
+        if let Some(existing) = merged.iter_mut().find(|s| {
+            s.path == symbol.path
+                && s.name == symbol.name
+                && s.kind == symbol.kind
+                && s.span.start_line == symbol.span.start_line
+        }) {
+            if symbol.qualified_name.len() < existing.qualified_name.len() {
+                // Merge base_classes from the replacement
+                let mut base: Vec<String> = std::mem::take(&mut existing.base_classes);
+                base.extend(symbol.base_classes.clone());
+                *existing = symbol;
+                existing.base_classes = base;
+            }
+            continue;
+        }
         let key = (symbol.kind.clone(), symbol.qualified_name.clone());
         if seen.insert(key) {
             merged.push(symbol);
@@ -286,6 +340,7 @@ fn push_symbol(
         text: String::new(),
         calls: Vec::new(),
         tags: Vec::new(),
+        base_classes: Vec::new(),
     });
 }
 
@@ -434,5 +489,73 @@ T max(T a, T b) {
             .find(|node| node.name == "max")
             .expect("template function should be extracted");
         assert_eq!(max_fn.kind, NodeKind::Function);
+    }
+
+    #[test]
+    fn extracts_inheritance_and_out_of_line_methods() {
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("types.hpp"),
+            r#"
+namespace build {
+class WorkItemBase {
+public:
+    virtual void doProcess() = 0;
+};
+class BuildWorkItem : public WorkItemBase {
+public:
+    void doProcess() override;
+};
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("worker.cpp"),
+            r#"
+#include "types.hpp"
+namespace build {
+void BuildWorkItem::doProcess() {}
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_graph(temp.path()).unwrap();
+
+        // Out-of-line method in .cpp should be Method with class-qualified name
+        let method = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.qualified_name == "build::BuildWorkItem::doProcess"
+                    && node.kind == NodeKind::Method
+            })
+            .expect("out-of-line method should have class-qualified name and Method kind");
+
+        // Inheritance edge should exist
+        let extends_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == crate::EdgeKind::Extends)
+            .collect();
+        assert!(
+            !extends_edges.is_empty(),
+            "should have at least one extends edge"
+        );
+
+        let build_work_item = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "BuildWorkItem" && node.kind == NodeKind::Class)
+            .unwrap();
+        let work_item_base = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "WorkItemBase" && node.kind == NodeKind::Class)
+            .unwrap();
+        assert!(extends_edges.iter().any(|edge| {
+            edge.from == build_work_item.id && edge.to == work_item_base.id
+        }));
     }
 }

@@ -108,7 +108,7 @@ pub fn hub_penalty(node: &Node) -> f64 {
 
 pub fn utility_penalty(node: &Node, overlap: f64) -> f64 {
     let haystack = format!("{} {}", node.name, node.path).to_ascii_lowercase();
-    let generic = [
+    let generic_path = [
         "util",
         "utils",
         "logger",
@@ -119,13 +119,32 @@ pub fn utility_penalty(node: &Node, overlap: f64) -> f64 {
     ]
     .iter()
     .any(|needle| haystack.contains(needle));
-    if !generic {
+
+    let generic_method_names = [
+        "size", "c_str", "begin", "end", "empty", "Init",
+        "clear", "get", "Get", "set", "push_back", "pop_back",
+        "length", "data", "reset", "find", "insert",
+        "toString", "to_string", "init", "destroy", "IsOK",
+    ];
+    let is_generic_method = generic_method_names.contains(&node.name.as_str())
+        && node.metrics.in_degree > 20;
+
+    if !generic_path && !is_generic_method {
         return 0.0;
     }
-    if overlap >= 0.50 {
-        0.25
+
+    let penalty: f64 = if is_generic_method && !generic_path {
+        0.5
+    } else if is_generic_method && generic_path {
+        1.0
     } else {
         1.0
+    };
+
+    if overlap >= 0.50 {
+        (penalty * 0.25).min(penalty)
+    } else {
+        penalty
     }
 }
 

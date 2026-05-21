@@ -18,6 +18,7 @@ pub struct ExtractedSymbol {
     pub text: String,
     pub calls: Vec<String>,
     pub tags: Vec<String>,
+    pub base_classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
