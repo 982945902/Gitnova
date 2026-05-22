@@ -680,5 +680,8 @@ void BuildWorkItem::doProcess() {}
             .filter(|node| node.name == "InvertedIndexSearchTracer" && node.kind == NodeKind::Class)
             .collect();
         assert!(!tracer_classes.is_empty(), "InvertedIndexSearchTracer class must survive cross-file dedup");
+        // util::InvertedIndexSearchTracer MUST NOT be merged into indexlib variants
+        assert!(tracer_classes.iter().any(|n| n.qualified_name.contains("util")),
+            "util::InvertedIndexSearchTracer should not be merged into indexlib:: variants");
     }
 }

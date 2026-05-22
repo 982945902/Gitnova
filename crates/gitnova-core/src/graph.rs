@@ -364,8 +364,16 @@ fn is_namespace_subsequence(shorter: &[&str], longer: &[&str]) -> bool {
     if shorter.is_empty() || longer.is_empty() {
         return false;
     }
+    if shorter.len() >= longer.len() {
+        return false; // shorter must be strictly shorter
+    }
     if shorter.last() != longer.last() {
         return false; // same name must match
+    }
+    // Require same first segment to avoid merging genuinely different classes
+    // that happen to share the same short name (e.g. Config vs app::Config).
+    if shorter.len() >= 2 && longer.len() >= 2 && shorter[0] != longer[0] {
+        return false;
     }
     let mut li = 0;
     for s in shorter {
