@@ -2,12 +2,20 @@
 ;; V2: Reduced variable capture to fields only; fixed function_definition patterns.
 
 ;; ── Classes ──
+;; Primary: match via name: field
 (class_specifier
   name: (type_identifier) @name) @def.class
+
+;; Fallback: catch any class_specifier whose name field isn't a type_identifier
+;; (e.g. template-id, qualified name). Extract name in Rust code via child_name.
+(class_specifier) @def.class_fallback
 
 ;; ── Structs ──
 (struct_specifier
   name: (type_identifier) @name) @def.struct
+
+;; Fallback for structs
+(struct_specifier) @def.struct_fallback
 
 ;; ── Enums ──
 (enum_specifier

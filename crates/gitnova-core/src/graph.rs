@@ -304,19 +304,14 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
         // Find pairs where one qname is a suffix of another
         for &i in indices {
             for &j in indices {
-                if i == j {
-                    continue;
-                }
+                if i == j { continue; }
                 let qi = nodes[i].qualified_name.as_str();
                 let qj = nodes[j].qualified_name.as_str();
-                // If qi ends with "::qj" or vice versa, merge to the longer one
                 let (remove_idx, keep_idx) = if qi.ends_with(&format!("::{}", qj)) {
                     (j, i)
                 } else if qj.ends_with(&format!("::{}", qi)) {
                     (i, j)
                 } else {
-                    // Check namespace subsequence: split both by "::" and see if the
-                    // shorter parts are a subsequence of the longer parts.
                     let qi_parts: Vec<&str> = qi.split("::").collect();
                     let qj_parts: Vec<&str> = qj.split("::").collect();
                     let (short_parts, long_parts, short_idx, long_idx) = if qi_parts.len() < qj_parts.len() {
@@ -326,9 +321,7 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
                     };
                     if is_namespace_subsequence(short_parts, long_parts) {
                         (short_idx, long_idx)
-                    } else {
-                        continue;
-                    }
+                    } else { continue; }
                 };
                 let keep_id = nodes[keep_idx].id.clone();
                 if !id_map.contains_key(&nodes[remove_idx].id) {

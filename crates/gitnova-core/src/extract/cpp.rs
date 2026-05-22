@@ -149,13 +149,21 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
             }
         }
 
-        let name = match name_text {
-            Some(n) => n,
-            None => continue,
-        };
         let def_node = match def_node {
             Some(n) => n,
             None => continue,
+        };
+
+        // For fallback class/struct captures, extract name from the def_node itself
+        let name = match (name_text, def_capture_name) {
+            (Some(n), _) => n,
+            (None, Some("def.class_fallback")) => {
+                child_name(def_node, source).unwrap_or_else(|| "unknown".to_string())
+            }
+            (None, Some("def.struct_fallback")) => {
+                child_name(def_node, source).unwrap_or_else(|| "unknown".to_string())
+            }
+            _ => continue,
         };
 
         // Filter C++ keywords and literals that tree-sitter misidentifies as identifiers
@@ -165,8 +173,8 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
 
         // Determine NodeKind
         let mut kind = match def_capture_name {
-            Some("def.class") => NodeKind::Class,
-            Some("def.struct") => NodeKind::Struct,
+            Some("def.class") | Some("def.class_fallback") => NodeKind::Class,
+            Some("def.struct") | Some("def.struct_fallback") => NodeKind::Struct,
             Some("def.enum") => NodeKind::Enum,
             Some("def.enum_value") => NodeKind::Variable,
             Some("def.union") => NodeKind::Union,
@@ -639,5 +647,38 @@ void BuildWorkItem::doProcess() {}
         assert!(extends_edges.iter().any(|edge| {
             edge.from == build_work_item.id && edge.to == work_item_base.id
         }));
+    }
+
+    #[test]
+    fn preserves_class_after_cross_file_namespace_dedup() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // File 1: full namespace qualifier
+        fs::write(
+            temp.path().join("tracer.h"),
+            "namespace indexlib::index {\nclass InvertedIndexSearchTracer {\npublic:\n    void SetBitmapTerm();\n};\n}\n",
+        )
+        .unwrap();
+        // File 2: shorter namespace (from "using namespace indexlib")
+        fs::write(
+            temp.path().join("posting.h"),
+            "namespace indexlib {\nclass InvertedIndexSearchTracer {\npublic:\n    bool IsBitmapTerm();\n};\n}\n",
+        )
+        .unwrap();
+        // File 3: same class name, different namespace
+        fs::write(
+            temp.path().join("other.h"),
+            "namespace util {\nclass InvertedIndexSearchTracer {\npublic:\n    int count;\n};\n}\n",
+        )
+        .unwrap();
+
+        let graph = build_graph(temp.path()).unwrap();
+
+        // Should have at least one class node for InvertedIndexSearchTracer
+        let tracer_classes: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.name == "InvertedIndexSearchTracer" && node.kind == NodeKind::Class)
+            .collect();
+        assert!(!tracer_classes.is_empty(), "InvertedIndexSearchTracer class must survive cross-file dedup");
     }
 }
