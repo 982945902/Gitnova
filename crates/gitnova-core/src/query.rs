@@ -90,7 +90,13 @@ pub fn summarize(graph: &CodeGraph) -> GraphSummary {
         "toString", "to_string", "init", "destroy", "IsOK",
     ];
     hubs.retain(|node| {
-        !(generic_names.contains(&node.name.as_str()) && node.in_degree > 100)
+        let generic_name = generic_names.contains(&node.name.as_str()) && node.in_degree > 100;
+        // Project-wide macros (logging, shared_ptr, etc.) are never architecturally significant
+        let high_degree_macro = matches!(node.kind, NodeKind::Macro) && node.in_degree > 1000;
+        // High-degree variables with short names tend to be utility constants
+        let generic_variable = matches!(node.kind, NodeKind::Variable)
+            && node.name.len() <= 4 && node.in_degree > 500;
+        !(generic_name || high_degree_macro || generic_variable)
     });
     hubs.sort_by_key(|node| std::cmp::Reverse(node.in_degree + node.out_degree));
     hubs.truncate(10);

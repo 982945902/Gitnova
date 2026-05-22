@@ -182,22 +182,18 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
             }
             calls.push((node_id.clone(), symbol.calls));
             for base in &symbol.base_classes {
-                // Link to symbols with matching name in symbol_by_name.
-                // Base classes are referenced by short name (e.g. "BuildWorkItem").
-                // Prefer class/struct targets over typedef for extends edges.
                 if let Some(targets) = symbol_by_name.get(base) {
-                    let preferred = targets.iter().find(|t| {
-                        graph.node(t).map(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct)).unwrap_or(false)
-                    }).or_else(|| targets.first());
+                    // Pick the best target: class > struct > qualified (has ::) > any
+                    let preferred = targets.iter().max_by_key(|t| {
+                        match graph.node(t).map(|n| &n.kind) {
+                            Some(NodeKind::Class) => 3,
+                            Some(NodeKind::Struct) => 2,
+                            _ if graph.node(t).map_or(false, |n| n.qualified_name.contains("::")) => 1,
+                            _ => 0,
+                        }
+                    });
                     if let Some(target) = preferred {
-                        add_edge(
-                            &mut graph.edges,
-                            &mut edge_set,
-                            &node_id,
-                            target,
-                            EdgeKind::Extends,
-                            9_000,
-                        );
+                        add_edge(&mut graph.edges, &mut edge_set, &node_id, target, EdgeKind::Extends, 9_000);
                     }
                 }
             }
