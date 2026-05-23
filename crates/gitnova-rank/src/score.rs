@@ -56,11 +56,31 @@ pub fn rank_graph(graph: &CodeGraph, query: &str, limit: usize) -> RankResponse 
     rank_graph_with_embeddings(graph, query, limit, None)
 }
 
+pub fn rank_graph_with_fts(
+    graph: &CodeGraph,
+    query: &str,
+    limit: usize,
+    embedding_similarity: Option<&HashMap<String, f64>>,
+    fts_candidates: Option<&std::collections::HashSet<String>>,
+) -> RankResponse {
+    rank_graph_with_embeddings_inner(graph, query, limit, embedding_similarity, fts_candidates)
+}
+
 pub fn rank_graph_with_embeddings(
     graph: &CodeGraph,
     query: &str,
     limit: usize,
     embedding_similarity: Option<&HashMap<String, f64>>,
+) -> RankResponse {
+    rank_graph_with_embeddings_inner(graph, query, limit, embedding_similarity, None)
+}
+
+fn rank_graph_with_embeddings_inner(
+    graph: &CodeGraph,
+    query: &str,
+    limit: usize,
+    embedding_similarity: Option<&HashMap<String, f64>>,
+    fts_candidates: Option<&std::collections::HashSet<String>>,
 ) -> RankResponse {
     let mut config = RankConfig::default();
     if embedding_similarity.is_none() {
@@ -77,8 +97,19 @@ pub fn rank_graph_with_embeddings(
         .nodes
         .iter()
         .filter(|node| {
-            !(matches!(node.kind, NodeKind::Repository | NodeKind::Import)
-                || node.kind == NodeKind::File && node.text.len() > 40_000)
+            if matches!(node.kind, NodeKind::Repository | NodeKind::Import)
+                || (node.kind == NodeKind::File && node.text.len() > 40_000)
+            {
+                return false;
+            }
+            // FTS pre-filter: only score FTS candidates if we have some.
+            // Empty FTS results mean the index isn't ready — fall back to full scan.
+            if let Some(fts) = fts_candidates {
+                if !fts.is_empty() && !fts.contains(&node.id) {
+                    return false;
+                }
+            }
+            true
         })
         .map(|node| {
             score_node(
