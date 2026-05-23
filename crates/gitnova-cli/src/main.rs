@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
             // FTS pre-filter: narrow candidates via full-text search
             let fts_candidates = FtsStore::open(&args.repo)
                 .ok()
-                .and_then(|fts| fts.search(&args.query, 500).ok())
+                .and_then(|fts| fts.search(&args.query, 200).ok())
                 .map(|ids| ids.into_iter().collect::<HashSet<_>>());
             print_json(&rank_graph_with_fts(
                 &graph,
@@ -244,22 +244,23 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     store.export_json(&graph)?;
     save_manifest_from_files(&mut store, files)?;
 
-    // Build FTS index
-    let fts = FtsStore::open(repo)?;
-    let fts_symbols: Vec<FtsSymbol> = graph
-        .nodes
-        .iter()
-        .filter(|n| !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import | gitnova_core::NodeKind::File))
-        .map(|n| FtsSymbol {
-            node_id: n.id.clone(),
-            name: n.name.clone(),
-            qualified_name: n.qualified_name.clone(),
-            kind: format!("{:?}", n.kind).to_lowercase(),
-            path: n.path.clone(),
-            text: n.text.clone(),
-        })
-        .collect();
-    fts.rebuild_index(&fts_symbols)?;
+    // Build FTS index (non-fatal — graceful fallback if it fails)
+    if let Ok(fts) = FtsStore::open(repo) {
+        let fts_symbols: Vec<FtsSymbol> = graph
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import | gitnova_core::NodeKind::File))
+            .map(|n| FtsSymbol {
+                node_id: n.id.clone(),
+                name: n.name.clone(),
+                qualified_name: n.qualified_name.clone(),
+                kind: format!("{:?}", n.kind).to_lowercase(),
+                path: n.path.clone(),
+                text: n.text.clone(),
+            })
+            .collect();
+        let _ = fts.rebuild_index(&fts_symbols);
+    }
 
     Ok(IndexReport {
         status: "indexed",

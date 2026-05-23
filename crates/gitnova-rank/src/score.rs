@@ -93,33 +93,36 @@ fn rank_graph_with_embeddings_inner(
     config.lsp_weight = 0.0;
 
     let query_tokens = features::tokenize(query);
+    // FTS boost: top FTS results get a positional bonus (signal, not filter)
+    let fts_scores: std::collections::HashMap<String, f64> = fts_candidates
+        .as_ref()
+        .map(|ids| {
+            let n = ids.len().max(1) as f64;
+            ids.iter().enumerate().map(|(i, id)| (id.clone(), 0.08 * (1.0 - i as f64 / n))).collect()
+        })
+        .unwrap_or_default();
+
     let mut results = graph
         .nodes
         .iter()
         .filter(|node| {
-            if matches!(node.kind, NodeKind::Repository | NodeKind::Import)
-                || (node.kind == NodeKind::File && node.text.len() > 40_000)
-            {
-                return false;
-            }
-            // FTS pre-filter: only score FTS candidates if we have some.
-            // Empty FTS results mean the index isn't ready — fall back to full scan.
-            if let Some(fts) = fts_candidates {
-                if !fts.is_empty() && !fts.contains(&node.id) {
-                    return false;
-                }
-            }
-            true
+            !(matches!(node.kind, NodeKind::Repository | NodeKind::Import)
+                || node.kind == NodeKind::File && node.text.len() > 40_000)
         })
         .map(|node| {
-            score_node(
+            let mut ranked = score_node(
                 graph,
                 node,
                 query,
                 &query_tokens,
                 &config,
                 embedding_similarity,
-            )
+            );
+            // FTS boost: nodes matching the full-text query get a small bonus
+            if let Some(boost) = fts_scores.get(&node.id) {
+                ranked.score += boost;
+            }
+            ranked
         })
         .collect::<Vec<_>>();
     results.sort_by(|a, b| {
