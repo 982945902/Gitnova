@@ -425,12 +425,6 @@ fn index_repo(repo: &Path) -> Result<Value> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-<<<<<<< HEAD
-    let store = GitnovaStore::open(repo)?;
-    store.save_graph(&graph)?;
-    store.export_json(&graph)?;
-=======
->>>>>>> origin/worktree-agent-a617ffcd
     let now = gitnova_core::model::current_unix();
     let manifest = files
         .iter()
