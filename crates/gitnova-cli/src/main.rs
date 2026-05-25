@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
+use gitnova_core::model::EdgeKind;
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings, rank_graph_with_fts};
-use gitnova_storage::{FileManifestEntry, FtsStore, FtsSymbol, GitnovaStore};
+use gitnova_storage::{FileManifestEntry, FtsStore, FtsSymbol, GitnovaStore, SurrealStore};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
@@ -262,6 +263,39 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
         let _ = fts.rebuild_index(&fts_symbols);
     }
 
+    // Mirror to SurrealDB for graph query capabilities (best-effort, non-fatal)
+    if let Ok(surreal) = SurrealStore::open(repo) {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let _: Result<()> = rt.block_on(async {
+                let _ = surreal.db.query("DELETE FROM symbol").await;
+                let _ = surreal.db.query("DELETE FROM calls_edge").await;
+                let _ = surreal.db.query("DELETE FROM extends_edge").await;
+                for n in graph.nodes.iter().filter(|n| {
+                    !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import)
+                }) {
+                    let kind_str = format!("{:?}", n.kind).to_lowercase();
+                    let text_escaped = n.text.replace('\'', "\\'");
+                    let qname_escaped = n.qualified_name.replace('\'', "\\'");
+                    let name_escaped = n.name.replace('\'', "\\'");
+                    let _ = surreal.db.query(format!(
+                        "CREATE symbol CONTENT {{ id: '{}', name: '{}', qualified_name: '{}', kind: '{}', path: '{}', text: '{}', in_degree: {}, out_degree: {} }};",
+                        n.id, name_escaped, qname_escaped, kind_str, n.path, text_escaped, n.metrics.in_degree, n.metrics.out_degree
+                    )).await;
+                }
+                for e in &graph.edges {
+                    let tbl = edge_table(e.kind.clone());
+                    let _ = surreal.db.query(format!(
+                        "LET $src = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
+                         LET $dst = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
+                         RELATE $src->{}->$dst SET confidence = {};",
+                        e.from, e.to, tbl, e.confidence_basis_points
+                    )).await;
+                }
+                Ok(())
+            });
+        }
+    }
+
     Ok(IndexReport {
         status: "indexed",
         summary: query::summarize(&graph),
@@ -343,4 +377,15 @@ fn watch_repo(repo: &Path) -> Result<()> {
 fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn edge_table(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::Calls => "calls_edge",
+        EdgeKind::References => "references_edge",
+        EdgeKind::Extends => "extends_edge",
+        EdgeKind::Contains => "contains_edge",
+        EdgeKind::Defines => "defines_edge",
+        EdgeKind::Imports => "imports_edge",
+    }
 }
