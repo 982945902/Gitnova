@@ -1,12 +1,11 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
-use gitnova_core::model::EdgeKind;
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
-use gitnova_rank::{diff, rank_graph_with_embeddings, rank_graph_with_fts};
-use gitnova_storage::{FileManifestEntry, FtsStore, FtsSymbol, GitnovaStore, SurrealStore};
+use gitnova_rank::{diff, rank_graph_with_fts};
+use gitnova_storage::{FileManifestEntry, SurrealStore};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
@@ -161,21 +160,22 @@ async fn main() -> Result<()> {
         Commands::Update(args) => print_json(&update_repo(&args.repo)?)?,
         Commands::Watch(args) => watch_repo(&args.repo)?,
         Commands::Stats(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::summarize(&graph))?;
         }
         Commands::RankContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
-            let vectors = GitnovaStore::open(&args.repo)?.load_embeddings(LOCAL_HASH_PROVIDER)?;
+            let store = SurrealStore::open(&args.repo)?;
+            let graph = store.load_graph()?;
+            let vectors = store.load_embeddings(LOCAL_HASH_PROVIDER)?;
             let similarities = if vectors.is_empty() {
                 None
             } else {
                 Some(embeddings::similarity_map(&graph, &vectors, &args.query))
             };
             // FTS pre-filter: narrow candidates via full-text search
-            let fts_candidates = FtsStore::open(&args.repo)
+            let fts_candidates = store
+                .search_fts(&args.query, 200)
                 .ok()
-                .and_then(|fts| fts.search(&args.query, 200).ok())
                 .map(|ids| ids.into_iter().collect::<HashSet<_>>());
             print_json(&rank_graph_with_fts(
                 &graph,
@@ -186,11 +186,11 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ExplainSymbol(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::explain_symbol(&graph, &args.symbol))?;
         }
         Commands::GraphContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::graph_context(
                 &graph,
                 &args.selector,
@@ -199,25 +199,26 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ImpactAnalysis(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::impact_analysis(&graph, &args.symbol, args.limit))?;
         }
         Commands::ArchitectureMap(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::architecture_map(&graph, args.focus.as_deref()))?;
         }
         Commands::DiffContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&diff::diff_context(
                 &graph, &args.repo, &args.base, args.limit,
             ))?;
         }
         Commands::Embeddings(args) => match args.command {
             EmbeddingCommands::Build(build) => {
-                let graph = GitnovaStore::open(&build.repo)?.load_graph()?;
+                let store = SurrealStore::open(&build.repo)?;
+                let graph = store.load_graph()?;
                 let embeddings = embeddings::build_embeddings(&graph, &build.provider)?;
                 let count = embeddings.len();
-                GitnovaStore::open(&build.repo)?.save_embeddings(&embeddings)?;
+                store.save_embeddings(&embeddings)?;
                 print_json(&json!({
                     "status": "built",
                     "provider": build.provider,
@@ -240,62 +241,10 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    let mut store = GitnovaStore::open(repo)?;
+    let store = SurrealStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
-    save_manifest_from_files(&mut store, files)?;
-
-    // Build FTS index (non-fatal — graceful fallback if it fails)
-    if let Ok(fts) = FtsStore::open(repo) {
-        let fts_symbols: Vec<FtsSymbol> = graph
-            .nodes
-            .iter()
-            .filter(|n| !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import | gitnova_core::NodeKind::File))
-            .map(|n| FtsSymbol {
-                node_id: n.id.clone(),
-                name: n.name.clone(),
-                qualified_name: n.qualified_name.clone(),
-                kind: format!("{:?}", n.kind).to_lowercase(),
-                path: n.path.clone(),
-                text: n.text.clone(),
-            })
-            .collect();
-        let _ = fts.rebuild_index(&fts_symbols);
-    }
-
-    // Mirror to SurrealDB for graph query capabilities (best-effort, non-fatal)
-    if let Ok(surreal) = SurrealStore::open(repo) {
-        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            let _: Result<()> = rt.block_on(async {
-                let _ = surreal.db.query("DELETE FROM symbol").await;
-                let _ = surreal.db.query("DELETE FROM calls_edge").await;
-                let _ = surreal.db.query("DELETE FROM extends_edge").await;
-                for n in graph.nodes.iter().filter(|n| {
-                    !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import)
-                }) {
-                    let kind_str = format!("{:?}", n.kind).to_lowercase();
-                    let text_escaped = n.text.replace('\'', "\\'");
-                    let qname_escaped = n.qualified_name.replace('\'', "\\'");
-                    let name_escaped = n.name.replace('\'', "\\'");
-                    let _ = surreal.db.query(format!(
-                        "CREATE symbol CONTENT {{ id: '{}', name: '{}', qualified_name: '{}', kind: '{}', path: '{}', text: '{}', in_degree: {}, out_degree: {} }};",
-                        n.id, name_escaped, qname_escaped, kind_str, n.path, text_escaped, n.metrics.in_degree, n.metrics.out_degree
-                    )).await;
-                }
-                for e in &graph.edges {
-                    let tbl = edge_table(e.kind.clone());
-                    let _ = surreal.db.query(format!(
-                        "LET $src = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
-                         LET $dst = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
-                         RELATE $src->{}->$dst SET confidence = {};",
-                        e.from, e.to, tbl, e.confidence_basis_points
-                    )).await;
-                }
-                Ok(())
-            });
-        }
-    }
-
+    save_manifest_from_files(&store, files)?;
     Ok(IndexReport {
         status: "indexed",
         summary: query::summarize(&graph),
@@ -304,7 +253,7 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 
 fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let files = scan_repository(repo)?;
-    let mut store = GitnovaStore::open(repo)?;
+    let store = SurrealStore::open(repo)?;
     let old = store.load_manifest().unwrap_or_default();
     let current_paths: HashSet<_> = files
         .iter()
@@ -328,7 +277,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     apply_lsp_metadata(&mut graph);
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
-    save_manifest_from_files(&mut store, files)?;
+    save_manifest_from_files(&store, files)?;
     Ok(UpdateReport {
         status: "updated",
         skipped,
@@ -339,7 +288,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
 }
 
 fn save_manifest_from_files(
-    store: &mut GitnovaStore,
+    store: &SurrealStore,
     files: Vec<gitnova_core::scan::SourceFile>,
 ) -> Result<()> {
     let now = current_unix();
@@ -379,13 +328,3 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-fn edge_table(kind: EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::Calls => "calls_edge",
-        EdgeKind::References => "references_edge",
-        EdgeKind::Extends => "extends_edge",
-        EdgeKind::Contains => "contains_edge",
-        EdgeKind::Defines => "defines_edge",
-        EdgeKind::Imports => "imports_edge",
-    }
-}

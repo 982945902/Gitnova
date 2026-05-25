@@ -1,17 +1,40 @@
 use assert_cmd::cargo::cargo_bin;
 use assert_cmd::Command;
 use serde_json::Value;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .join(name)
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+fn temp_fixture(name: &str) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join(name);
+    copy_dir(&fixture(name), &repo);
+    (temp, repo)
 }
 
 fn free_port() -> u16 {
@@ -49,7 +72,7 @@ fn get_text(port: u16, path: &str) -> Option<String> {
 
 #[test]
 fn dashboard_serves_summary_api() {
-    let repo = fixture("rust_sample");
+    let (_temp, repo) = temp_fixture("rust_sample");
     Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])
@@ -89,7 +112,7 @@ fn dashboard_serves_summary_api() {
 
 #[test]
 fn dashboard_serves_ranked_graph_context_api() {
-    let repo = fixture("ts_sample");
+    let (_temp, repo) = temp_fixture("ts_sample");
     Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])
@@ -136,7 +159,7 @@ fn dashboard_serves_ranked_graph_context_api() {
 
 #[test]
 fn dashboard_serves_answer_api_with_deterministic_fallback() {
-    let repo = fixture("ts_sample");
+    let (_temp, repo) = temp_fixture("ts_sample");
     Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])
@@ -197,7 +220,7 @@ fn dashboard_serves_answer_api_with_deterministic_fallback() {
 
 #[test]
 fn dashboard_serves_graph_visualization_shell() {
-    let repo = fixture("rust_sample");
+    let (_temp, repo) = temp_fixture("rust_sample");
     Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])

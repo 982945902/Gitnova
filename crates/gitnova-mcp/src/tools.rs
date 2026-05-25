@@ -5,7 +5,7 @@ use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::llm;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings};
-use gitnova_storage::{FileManifestEntry, GitnovaStore};
+use gitnova_storage::{FileManifestEntry, SurrealStore};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -16,8 +16,27 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Global singleton store to avoid RocksDB lock conflicts within the same process.
+/// SurrealDB v2's RocksDB engine doesn't release file locks when the connection is dropped,
+/// so we keep one connection alive for the entire server lifetime.
+static GLOBAL_STORE: OnceLock<Mutex<Option<(PathBuf, SurrealStore)>>> = OnceLock::new();
+
 static WATCHERS: OnceLock<Mutex<HashMap<String, WatchRecord>>> = OnceLock::new();
 static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Access a SurrealStore for the given repo, using a global singleton connection.
+/// RocksDB file locks are not properly released on connection drop within the same process,
+/// so we keep one connection alive for the entire server lifetime.
+pub(crate) fn with_store<R>(repo: &Path, f: impl FnOnce(&SurrealStore) -> Result<R>) -> Result<R> {
+    let lock = GLOBAL_STORE.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().unwrap();
+    if guard.as_ref().map_or(true, |(p, _)| p != repo) {
+        // Different repo path — replace the store (old RocksDB connection is dropped,
+        // which is safe because the new store uses a different database directory).
+        *guard = Some((repo.to_path_buf(), SurrealStore::open(repo)?));
+    }
+    f(&guard.as_ref().unwrap().1)
+}
 
 struct WatchRecord {
     repo: PathBuf,
@@ -97,73 +116,90 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
                 .and_then(Value::as_str)
                 .unwrap_or("architecture");
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let store = GitnovaStore::open(repo_state.as_path())?;
-            let vectors = store
-                .load_embeddings(LOCAL_HASH_PROVIDER)
-                .unwrap_or_default();
-            let similarities = if vectors.is_empty() {
-                None
-            } else {
-                Some(embeddings::similarity_map(&graph, &vectors, query_text))
-            };
-            json!(rank_graph_with_embeddings(
-                &graph,
-                query_text,
-                limit,
-                similarities.as_ref()
-            ))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let vectors = store
+                    .load_embeddings(LOCAL_HASH_PROVIDER)
+                    .unwrap_or_default();
+                let similarities = if vectors.is_empty() {
+                    None
+                } else {
+                    Some(embeddings::similarity_map(&graph, &vectors, query_text))
+                };
+                Ok(json!(rank_graph_with_embeddings(
+                    &graph,
+                    query_text,
+                    limit,
+                    similarities.as_ref()
+                )))
+            })?
         }
         "graph_context" => {
             let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let selector = selector_from_arguments(arguments, &graph);
-            json!(query::graph_context(&graph, &selector, depth, limit))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let selector = selector_from_arguments(arguments, &graph);
+                Ok(json!(query::graph_context(&graph, &selector, depth, limit)))
+            })?
         }
         "answer_with_context" => {
             let query_text = arguments.get("query").and_then(Value::as_str).unwrap_or("");
             let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            json!(llm::answer_with_context(&graph, query_text, depth, limit))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                Ok(json!(llm::answer_with_context(&graph, query_text, depth, limit)))
+            })?
         }
         "llm_explain_node" => {
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let selector = selector_from_arguments(arguments, &graph);
-            let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
-            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
-            json!(llm::llm_explain_node(&graph, &selector, depth, limit))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let selector = selector_from_arguments(arguments, &graph);
+                let depth = arguments.get("depth").and_then(Value::as_u64).unwrap_or(1) as usize;
+                let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(40) as usize;
+                Ok(json!(llm::llm_explain_node(&graph, &selector, depth, limit)))
+            })?
         }
         "llm_impact_summary" => {
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let selector = selector_from_arguments(arguments, &graph);
-            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-            json!(llm::llm_impact_summary(&graph, &selector, limit))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let selector = selector_from_arguments(arguments, &graph);
+                let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                Ok(json!(llm::llm_impact_summary(&graph, &selector, limit)))
+            })?
         }
         "explain_node" => {
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let selector = selector_from_arguments(arguments, &graph);
-            json!(query::explain_node(&graph, &selector))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let selector = selector_from_arguments(arguments, &graph);
+                Ok(json!(query::explain_node(&graph, &selector)))
+            })?
         }
         "explain_symbol" => {
             let symbol = arguments
                 .get("symbol")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            json!(query::explain_symbol(&graph, symbol))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                Ok(json!(query::explain_symbol(&graph, symbol)))
+            })?
         }
         "impact_analysis" | "impact" => {
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let selector = selector_from_arguments(arguments, &graph);
-            json!(query::impact_analysis(&graph, &selector, limit))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let selector = selector_from_arguments(arguments, &graph);
+                Ok(json!(query::impact_analysis(&graph, &selector, limit)))
+            })?
         }
         "architecture_map" => {
             let focus = arguments.get("focus").and_then(Value::as_str);
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            json!(query::architecture_map(&graph, focus))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                Ok(json!(query::architecture_map(&graph, focus)))
+            })?
         }
         "watch_project" => {
             let path = arguments
@@ -194,13 +230,15 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
                 .and_then(Value::as_str)
                 .unwrap_or("main");
             let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            json!(diff::diff_context(
-                &graph,
-                repo_state.as_path(),
-                base,
-                limit
-            ))
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                Ok(json!(diff::diff_context(
+                    &graph,
+                    repo_state.as_path(),
+                    base,
+                    limit
+                )))
+            })?
         }
         "search_embeddings" => {
             let query_text = arguments.get("query").and_then(Value::as_str).unwrap_or("");
@@ -209,11 +247,13 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
                 .get("provider")
                 .and_then(Value::as_str)
                 .unwrap_or(LOCAL_HASH_PROVIDER);
-            let graph = GitnovaStore::open(repo_state.as_path())?.load_graph()?;
-            let vectors = GitnovaStore::open(repo_state.as_path())?.load_embeddings(provider)?;
-            json!(embeddings::search_embeddings_with_provider(
-                &graph, &vectors, query_text, provider, limit
-            )?)
+            with_store(repo_state, |store| {
+                let graph = store.load_graph()?;
+                let vectors = store.load_embeddings(provider)?;
+                Ok(json!(embeddings::search_embeddings_with_provider(
+                    &graph, &vectors, query_text, provider, limit
+                )?))
+            })?
         }
         other => json!({ "error": format!("unknown tool {other}") }),
     };
@@ -385,20 +425,22 @@ fn index_repo(repo: &Path) -> Result<Value> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    let mut store = GitnovaStore::open(repo)?;
-    store.save_graph(&graph)?;
-    store.export_json(&graph)?;
     let now = gitnova_core::model::current_unix();
     let manifest = files
-        .into_iter()
+        .iter()
         .map(|file| FileManifestEntry {
-            path: file.relative_path,
-            content_hash: file.content_hash,
+            path: file.relative_path.clone(),
+            content_hash: file.content_hash.clone(),
             language: file.language,
             indexed_at_unix: now,
         })
         .collect::<Vec<_>>();
-    store.save_manifest(&manifest)?;
+    with_store(repo, |store| {
+        store.save_graph(&graph)?;
+        store.export_json(&graph)?;
+        store.save_manifest(&manifest)?;
+        Ok(())
+    })?;
     Ok(json!({
         "status": "indexed",
         "summary": query::summarize(&graph)

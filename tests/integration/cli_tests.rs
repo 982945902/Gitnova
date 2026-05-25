@@ -35,24 +35,27 @@ fn temp_fixture(name: &str) -> (TempDir, PathBuf) {
 fn cli_indexes_persists_and_ranks_rust_auth_fixture() {
     let (_temp, repo) = temp_fixture("rust_sample");
 
-    Command::cargo_bin("gitnova")
+    let index_out = Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    assert!(index_out.status.success());
+    eprintln!("RUST INDEX STDERR: {}", String::from_utf8_lossy(&index_out.stderr));
 
-    assert!(repo.join(".gitnova/gitnova.db").exists());
+    assert!(repo.join(".gitnova/surrealdb").exists());
     assert!(repo.join(".gitnova/index.json").exists());
 
-    let stats = Command::cargo_bin("gitnova")
+    let stats_out = Command::cargo_bin("gitnova")
         .unwrap()
         .args(["stats", "--repo", repo.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stats: Value = serde_json::from_slice(&stats).unwrap();
+        .output()
+        .unwrap();
+    assert!(stats_out.status.success());
+    eprintln!("RUST STATS STDERR: {}", String::from_utf8_lossy(&stats_out.stderr));
+
+    let stats: Value = serde_json::from_slice(&stats_out.stdout).unwrap();
+    eprintln!("RUST STATS: {:?}", stats);
     assert!(stats["nodes"].as_u64().unwrap() >= 8);
     assert!(stats["edges"].as_u64().unwrap() >= 8);
 
@@ -308,21 +311,29 @@ fn incremental_update_reports_skips_changes_and_deletes() {
 fn cpp_fixture_indexes_and_ranks_with_utility_downranking() {
     let (_temp, repo) = temp_fixture("cpp_sample");
 
-    Command::cargo_bin("gitnova")
+    let index_output = Command::cargo_bin("gitnova")
         .unwrap()
         .args(["index", repo.to_str().unwrap(), "--force"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    assert!(index_output.status.success(), "index failed: {}\n{}",
+        String::from_utf8_lossy(&index_output.stdout),
+        String::from_utf8_lossy(&index_output.stderr));
+    eprintln!("INDEX STDERR: {}", String::from_utf8_lossy(&index_output.stderr));
 
-    let stats = Command::cargo_bin("gitnova")
+    let stats_output = Command::cargo_bin("gitnova")
         .unwrap()
         .args(["stats", "--repo", repo.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stats: Value = serde_json::from_slice(&stats).unwrap();
+        .output()
+        .unwrap();
+    assert!(stats_output.status.success(), "stats failed: {}\n{}",
+        String::from_utf8_lossy(&stats_output.stdout),
+        String::from_utf8_lossy(&stats_output.stderr));
+    eprintln!("STATS STDOUT: {}", String::from_utf8_lossy(&stats_output.stdout));
+    eprintln!("STATS STDERR: {}", String::from_utf8_lossy(&stats_output.stderr));
+
+    let stats: Value = serde_json::from_slice(&stats_output.stdout).unwrap();
+    eprintln!("STATS PARSED: {:?}", stats);
     assert_eq!(stats["files"].as_u64().unwrap(), 4);
     assert!(stats["languages"]["cpp"].as_u64().unwrap() >= 3);
 
