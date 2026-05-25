@@ -1,6 +1,5 @@
 use anyhow::Result;
 use gitnova_core::query;
-use gitnova_storage::GitnovaStore;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -26,7 +25,8 @@ fn resource(uri: &str, name: &str) -> Value {
 }
 
 pub fn read_resource(repo: impl AsRef<Path>, uri: &str) -> Result<Value> {
-    let graph = GitnovaStore::open(repo)?.load_graph()?;
+    let repo = repo.as_ref();
+    let graph = crate::tools::with_store(repo, |store| store.load_graph())?;
     let value = match uri {
         "gitnova://graph/summary" => json!(query::summarize(&graph)),
         "gitnova://graph/nodes" => json!(graph.nodes),

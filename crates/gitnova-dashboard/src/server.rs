@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use gitnova_core::query;
 use gitnova_enrich::llm;
 use gitnova_rank::rank_graph;
-use gitnova_storage::GitnovaStore;
+use gitnova_storage::SurrealStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -180,7 +180,7 @@ fn load_graph_value<F>(state: &DashboardState, f: F) -> Value
 where
     F: FnOnce(gitnova_core::CodeGraph) -> Value,
 {
-    match GitnovaStore::open(state.repo_root.as_ref()).and_then(|store| store.load_graph()) {
+    match SurrealStore::open(state.repo_root.as_ref()).and_then(|store| store.load_graph()) {
         Ok(graph) => f(graph),
         Err(err) => json!({ "error": err.to_string() }),
     }

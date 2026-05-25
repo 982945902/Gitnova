@@ -5,7 +5,11 @@ use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_fts};
+<<<<<<< HEAD
 use gitnova_storage::{FileManifestEntry, GitnovaStore};
+=======
+use gitnova_storage::{FileManifestEntry, SurrealStore};
+>>>>>>> origin/worktree-agent-a617ffcd
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
@@ -160,21 +164,28 @@ async fn main() -> Result<()> {
         Commands::Update(args) => print_json(&update_repo(&args.repo)?)?,
         Commands::Watch(args) => watch_repo(&args.repo)?,
         Commands::Stats(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::summarize(&graph))?;
         }
         Commands::RankContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
-            let vectors = GitnovaStore::open(&args.repo)?.load_embeddings(LOCAL_HASH_PROVIDER)?;
+            let store = SurrealStore::open(&args.repo)?;
+            let graph = store.load_graph()?;
+            let vectors = store.load_embeddings(LOCAL_HASH_PROVIDER)?;
             let similarities = if vectors.is_empty() {
                 None
             } else {
                 Some(embeddings::similarity_map(&graph, &vectors, &args.query))
             };
             // FTS pre-filter: narrow candidates via full-text search
+<<<<<<< HEAD
             let fts_candidates = GitnovaStore::open(&args.repo)
                 .ok()
                 .and_then(|store| store.search_fts(&args.query, 200).ok())
+=======
+            let fts_candidates = store
+                .search_fts(&args.query, 200)
+                .ok()
+>>>>>>> origin/worktree-agent-a617ffcd
                 .map(|ids| ids.into_iter().collect::<HashSet<_>>());
             print_json(&rank_graph_with_fts(
                 &graph,
@@ -185,11 +196,11 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ExplainSymbol(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::explain_symbol(&graph, &args.symbol))?;
         }
         Commands::GraphContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::graph_context(
                 &graph,
                 &args.selector,
@@ -198,25 +209,26 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ImpactAnalysis(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::impact_analysis(&graph, &args.symbol, args.limit))?;
         }
         Commands::ArchitectureMap(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&query::architecture_map(&graph, args.focus.as_deref()))?;
         }
         Commands::DiffContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = SurrealStore::open(&args.repo)?.load_graph()?;
             print_json(&diff::diff_context(
                 &graph, &args.repo, &args.base, args.limit,
             ))?;
         }
         Commands::Embeddings(args) => match args.command {
             EmbeddingCommands::Build(build) => {
-                let graph = GitnovaStore::open(&build.repo)?.load_graph()?;
+                let store = SurrealStore::open(&build.repo)?;
+                let graph = store.load_graph()?;
                 let embeddings = embeddings::build_embeddings(&graph, &build.provider)?;
                 let count = embeddings.len();
-                GitnovaStore::open(&build.repo)?.save_embeddings(&embeddings)?;
+                store.save_embeddings(&embeddings)?;
                 print_json(&json!({
                     "status": "built",
                     "provider": build.provider,
@@ -239,6 +251,7 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
+<<<<<<< HEAD
     let store = GitnovaStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
@@ -246,6 +259,12 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 
     // Build FTS index via SurrealDB search index (built-in, no separate index step needed)
 
+=======
+    let store = SurrealStore::open(repo)?;
+    store.save_graph(&graph)?;
+    store.export_json(&graph)?;
+    save_manifest_from_files(&store, files)?;
+>>>>>>> origin/worktree-agent-a617ffcd
     Ok(IndexReport {
         status: "indexed",
         summary: query::summarize(&graph),
@@ -254,7 +273,11 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 
 fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let files = scan_repository(repo)?;
+<<<<<<< HEAD
     let store = GitnovaStore::open(repo)?;
+=======
+    let store = SurrealStore::open(repo)?;
+>>>>>>> origin/worktree-agent-a617ffcd
     let old = store.load_manifest().unwrap_or_default();
     let current_paths: HashSet<_> = files
         .iter()
@@ -289,7 +312,11 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
 }
 
 fn save_manifest_from_files(
+<<<<<<< HEAD
     store: &GitnovaStore,
+=======
+    store: &SurrealStore,
+>>>>>>> origin/worktree-agent-a617ffcd
     files: Vec<gitnova_core::scan::SourceFile>,
 ) -> Result<()> {
     let now = current_unix();
@@ -328,3 +355,7 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/worktree-agent-a617ffcd

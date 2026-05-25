@@ -1,8 +1,37 @@
-use super::helpers::*;
 use assert_cmd::cargo::cargo_bin;
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use tempfile::TempDir;
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(name)
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+fn temp_fixture(name: &str) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join(name);
+    copy_dir(&fixture(name), &repo);
+    (temp, repo)
+}
 
 fn rpc(id: u64, method: &str, params: Value) -> String {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string()
@@ -11,10 +40,9 @@ fn rpc(id: u64, method: &str, params: Value) -> String {
 #[test]
 fn mcp_stdio_lists_tools_resources_and_calls_index() {
     let (_temp, repo) = temp_fixture("rust_sample");
-    let repo_str = repo.to_string_lossy().to_string();
     let mut child = Command::new(cargo_bin("gitnova"))
         .arg("serve")
-        .env("GITNOVA_REPO", &repo_str)
+        .env("GITNOVA_REPO", &repo)
         .env("GITNOVA_USE_LEGACY_STDIO", "1")
         .env_remove("GITNOVA_LLM_API_KEY")
         .env_remove("GITNOVA_LLM_MODEL")
@@ -28,6 +56,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
+    let repo_str = repo.to_str().unwrap().to_string();
     for line in [
         rpc(1, "initialize", json!({})),
         rpc(2, "tools/list", json!({})),
@@ -66,7 +95,7 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
             "tools/call",
             json!({
                 "name":"watch_project",
-                "arguments":{"path": fixture("rust_sample")}
+                "arguments":{"path": repo.to_str().unwrap()}
             }),
         ),
     ] {
@@ -93,6 +122,9 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
     assert!(serde_json::to_string(&responses[3])
         .unwrap()
         .contains("indexed"));
+
+    // Debug: print actual response[4]
+    eprintln!("RESPONSE[4]: {}", serde_json::to_string(&responses[4]).unwrap());
     assert!(
         serde_json::to_string(&responses[4])
             .unwrap()
@@ -118,10 +150,9 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
 #[test]
 fn mcp_default_stdio_uses_rmcp_server() {
     let (_temp, repo) = temp_fixture("rust_sample");
-    let repo_str = repo.to_string_lossy().to_string();
     let mut child = Command::new(cargo_bin("gitnova"))
         .arg("serve")
-        .env("GITNOVA_REPO", &repo_str)
+        .env("GITNOVA_REPO", &repo)
         .env_remove("GITNOVA_LLM_API_KEY")
         .env_remove("GITNOVA_LLM_MODEL")
         .stdin(Stdio::piped())
