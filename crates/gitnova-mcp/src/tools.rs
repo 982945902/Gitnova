@@ -385,7 +385,7 @@ fn index_repo(repo: &Path) -> Result<Value> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    let mut store = GitnovaStore::open(repo)?;
+    let store = GitnovaStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
     let now = gitnova_core::model::current_unix();

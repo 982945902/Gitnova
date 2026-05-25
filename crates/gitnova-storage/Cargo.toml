@@ -8,11 +8,9 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 gitnova-core = { path = "../gitnova-core" }
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-surrealdb = { version = "2", features = ["kv-rocksdb"] }
-tantivy = "0.22"
+surrealdb = { version = "2", features = ["kv-surrealkv"] }
 tokio = { workspace = true }
 thiserror.workspace = true
 

@@ -1,35 +1,7 @@
+use super::helpers::*;
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
-        .join(name)
-}
-
-fn copy_dir(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir(&from, &to);
-        } else {
-            fs::copy(&from, &to).unwrap();
-        }
-    }
-}
-
-fn temp_fixture(name: &str) -> (TempDir, PathBuf) {
-    let temp = TempDir::new().unwrap();
-    let repo = temp.path().join(name);
-    copy_dir(&fixture(name), &repo);
-    (temp, repo)
-}
 
 #[test]
 fn cli_indexes_persists_and_ranks_rust_auth_fixture() {
@@ -41,7 +13,7 @@ fn cli_indexes_persists_and_ranks_rust_auth_fixture() {
         .assert()
         .success();
 
-    assert!(repo.join(".gitnova/gitnova.db").exists());
+    assert!(repo.join(".gitnova/surrealdb").is_dir());
     assert!(repo.join(".gitnova/index.json").exists());
 
     let stats = Command::cargo_bin("gitnova")

@@ -1,12 +1,11 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
-use gitnova_core::model::EdgeKind;
 use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
-use gitnova_rank::{diff, rank_graph_with_embeddings, rank_graph_with_fts};
-use gitnova_storage::{FileManifestEntry, FtsStore, FtsSymbol, GitnovaStore, SurrealStore};
+use gitnova_rank::{diff, rank_graph_with_fts};
+use gitnova_storage::{FileManifestEntry, GitnovaStore};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
@@ -173,9 +172,9 @@ async fn main() -> Result<()> {
                 Some(embeddings::similarity_map(&graph, &vectors, &args.query))
             };
             // FTS pre-filter: narrow candidates via full-text search
-            let fts_candidates = FtsStore::open(&args.repo)
+            let fts_candidates = GitnovaStore::open(&args.repo)
                 .ok()
-                .and_then(|fts| fts.search(&args.query, 200).ok())
+                .and_then(|store| store.search_fts(&args.query, 200).ok())
                 .map(|ids| ids.into_iter().collect::<HashSet<_>>());
             print_json(&rank_graph_with_fts(
                 &graph,
@@ -240,61 +239,12 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    let mut store = GitnovaStore::open(repo)?;
+    let store = GitnovaStore::open(repo)?;
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
-    save_manifest_from_files(&mut store, files)?;
+    save_manifest_from_files(&store, files)?;
 
-    // Build FTS index (non-fatal — graceful fallback if it fails)
-    if let Ok(fts) = FtsStore::open(repo) {
-        let fts_symbols: Vec<FtsSymbol> = graph
-            .nodes
-            .iter()
-            .filter(|n| !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import | gitnova_core::NodeKind::File))
-            .map(|n| FtsSymbol {
-                node_id: n.id.clone(),
-                name: n.name.clone(),
-                qualified_name: n.qualified_name.clone(),
-                kind: format!("{:?}", n.kind).to_lowercase(),
-                path: n.path.clone(),
-                text: n.text.clone(),
-            })
-            .collect();
-        let _ = fts.rebuild_index(&fts_symbols);
-    }
-
-    // Mirror to SurrealDB for graph query capabilities (best-effort, non-fatal)
-    if let Ok(surreal) = SurrealStore::open(repo) {
-        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            let _: Result<()> = rt.block_on(async {
-                let _ = surreal.db.query("DELETE FROM symbol").await;
-                let _ = surreal.db.query("DELETE FROM calls_edge").await;
-                let _ = surreal.db.query("DELETE FROM extends_edge").await;
-                for n in graph.nodes.iter().filter(|n| {
-                    !matches!(n.kind, gitnova_core::NodeKind::Repository | gitnova_core::NodeKind::Import)
-                }) {
-                    let kind_str = format!("{:?}", n.kind).to_lowercase();
-                    let text_escaped = n.text.replace('\'', "\\'");
-                    let qname_escaped = n.qualified_name.replace('\'', "\\'");
-                    let name_escaped = n.name.replace('\'', "\\'");
-                    let _ = surreal.db.query(format!(
-                        "CREATE symbol CONTENT {{ id: '{}', name: '{}', qualified_name: '{}', kind: '{}', path: '{}', text: '{}', in_degree: {}, out_degree: {} }};",
-                        n.id, name_escaped, qname_escaped, kind_str, n.path, text_escaped, n.metrics.in_degree, n.metrics.out_degree
-                    )).await;
-                }
-                for e in &graph.edges {
-                    let tbl = edge_table(e.kind.clone());
-                    let _ = surreal.db.query(format!(
-                        "LET $src = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
-                         LET $dst = (SELECT * FROM symbol WHERE id = '{}' LIMIT 1);
-                         RELATE $src->{}->$dst SET confidence = {};",
-                        e.from, e.to, tbl, e.confidence_basis_points
-                    )).await;
-                }
-                Ok(())
-            });
-        }
-    }
+    // Build FTS index via SurrealDB search index (built-in, no separate index step needed)
 
     Ok(IndexReport {
         status: "indexed",
@@ -304,7 +254,7 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 
 fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let files = scan_repository(repo)?;
-    let mut store = GitnovaStore::open(repo)?;
+    let store = GitnovaStore::open(repo)?;
     let old = store.load_manifest().unwrap_or_default();
     let current_paths: HashSet<_> = files
         .iter()
@@ -328,7 +278,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     apply_lsp_metadata(&mut graph);
     store.save_graph(&graph)?;
     store.export_json(&graph)?;
-    save_manifest_from_files(&mut store, files)?;
+    save_manifest_from_files(&store, files)?;
     Ok(UpdateReport {
         status: "updated",
         skipped,
@@ -339,7 +289,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
 }
 
 fn save_manifest_from_files(
-    store: &mut GitnovaStore,
+    store: &GitnovaStore,
     files: Vec<gitnova_core::scan::SourceFile>,
 ) -> Result<()> {
     let now = current_unix();
@@ -377,15 +327,4 @@ fn watch_repo(repo: &Path) -> Result<()> {
 fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-fn edge_table(kind: EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::Calls => "calls_edge",
-        EdgeKind::References => "references_edge",
-        EdgeKind::Extends => "extends_edge",
-        EdgeKind::Contains => "contains_edge",
-        EdgeKind::Defines => "defines_edge",
-        EdgeKind::Imports => "imports_edge",
-    }
 }

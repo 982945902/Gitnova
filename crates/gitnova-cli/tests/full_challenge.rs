@@ -1,3 +1,6 @@
+#[path = "../../../tests/integration/helpers.rs"]
+mod helpers;
+
 #[path = "../../../tests/integration/cli_tests.rs"]
 mod cli_tests;
 
