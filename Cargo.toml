@@ -29,7 +29,6 @@ regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 notify = "8.2"
 git2 = "0.20"
 tree-sitter = "0.25"
@@ -42,6 +41,6 @@ lsp-types = "0.97"
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
-tempfile = "=3.26.0"
+tempfile = "3.27.0"
 assert_cmd = "2.0"
 predicates = "3.1"

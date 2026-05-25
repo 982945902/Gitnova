@@ -1,5 +1,5 @@
 use crate::json_export;
-use crate::sqlite::{FileManifestEntry, StoredEmbedding};
+use crate::types::{FileManifestEntry, StoredEmbedding};
 use anyhow::{Context, Result};
 use gitnova_core::model::{CodeGraph, NodeKind};
 use std::collections::HashMap;

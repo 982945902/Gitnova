@@ -1,9 +1,9 @@
 pub mod json_export;
-pub mod sqlite;
+pub mod types;
 pub mod surrealdb;
 
-pub use sqlite::{FileManifestEntry, StoredEmbedding};
 pub use surrealdb::{Db, SurrealStore};
+pub use types::{FileManifestEntry, StoredEmbedding};
 
 /// Backward-compatible alias
 pub type GitnovaStore = SurrealStore;
