@@ -160,12 +160,15 @@ async fn main() -> Result<()> {
         Commands::Update(args) => print_json(&update_repo(&args.repo)?)?,
         Commands::Watch(args) => watch_repo(&args.repo)?,
         Commands::Stats(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&query::summarize(&graph))?;
         }
         Commands::RankContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
-            let vectors = GitnovaStore::open(&args.repo)?.load_embeddings(LOCAL_HASH_PROVIDER)?;
+            let graph = load_graph_with_fallback(&args.repo)?;
+            let vectors = GitnovaStore::open(&args.repo)
+                .ok()
+                .and_then(|s| s.load_embeddings(LOCAL_HASH_PROVIDER).ok())
+                .unwrap_or_default();
             let similarities = if vectors.is_empty() {
                 None
             } else {
@@ -185,11 +188,11 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ExplainSymbol(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&query::explain_symbol(&graph, &args.symbol))?;
         }
         Commands::GraphContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&query::graph_context(
                 &graph,
                 &args.selector,
@@ -198,25 +201,25 @@ async fn main() -> Result<()> {
             ))?;
         }
         Commands::ImpactAnalysis(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&query::impact_analysis(&graph, &args.symbol, args.limit))?;
         }
         Commands::ArchitectureMap(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&query::architecture_map(&graph, args.focus.as_deref()))?;
         }
         Commands::DiffContext(args) => {
-            let graph = GitnovaStore::open(&args.repo)?.load_graph()?;
+            let graph = load_graph_with_fallback(&args.repo)?;
             print_json(&diff::diff_context(
                 &graph, &args.repo, &args.base, args.limit,
             ))?;
         }
         Commands::Embeddings(args) => match args.command {
             EmbeddingCommands::Build(build) => {
-                let graph = GitnovaStore::open(&build.repo)?.load_graph()?;
+                let graph = load_graph_with_fallback(&build.repo)?;
                 let embeddings = embeddings::build_embeddings(&graph, &build.provider)?;
                 let count = embeddings.len();
-                GitnovaStore::open(&build.repo)?.save_embeddings(&embeddings)?;
+                if let Ok(store) = GitnovaStore::open(&build.repo) { let _ = store.save_embeddings(&embeddings); }
                 print_json(&json!({
                     "status": "built",
                     "provider": build.provider,
@@ -239,12 +242,16 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    let store = GitnovaStore::open(repo)?;
-    store.save_graph(&graph)?;
-    store.export_json(&graph)?;
-    save_manifest_from_files(&store, files)?;
 
-    // Build FTS index via SurrealDB search index (built-in, no separate index step needed)
+    // Always export index.json as reliable backup
+    gitnova_storage::json_export::export_graph(&graph, &repo.join(".gitnova/index.json"))?;
+
+    // Try SurrealDB persistence (best-effort, non-fatal in nested runtime contexts)
+    if let Ok(store) = GitnovaStore::open(repo) {
+        let _ = store.save_graph(&graph);
+        let _ = store.export_json(&graph);
+        let _ = save_manifest_from_files(&store, files);
+    }
 
     Ok(IndexReport {
         status: "indexed",
@@ -254,8 +261,8 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 
 fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let files = scan_repository(repo)?;
-    let store = GitnovaStore::open(repo)?;
-    let old = store.load_manifest().unwrap_or_default();
+    let store = GitnovaStore::open(repo);
+    let old = store.as_ref().map(|s| s.load_manifest().unwrap_or_default()).unwrap_or_default();
     let current_paths: HashSet<_> = files
         .iter()
         .map(|file| file.relative_path.clone())
@@ -276,9 +283,12 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    store.save_graph(&graph)?;
-    store.export_json(&graph)?;
-    save_manifest_from_files(&store, files)?;
+    gitnova_storage::json_export::export_graph(&graph, &repo.join(".gitnova/index.json"))?;
+    if let Ok(ref s) = store {
+        let _ = s.save_graph(&graph);
+        let _ = s.export_json(&graph);
+        let _ = save_manifest_from_files(s, files);
+    }
     Ok(UpdateReport {
         status: "updated",
         skipped,
@@ -322,6 +332,16 @@ fn watch_repo(repo: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn load_graph_with_fallback(repo: &Path) -> Result<gitnova_core::CodeGraph> {
+    if let Ok(store) = GitnovaStore::open(repo) {
+        if let Ok(graph) = store.load_graph() {
+            return Ok(graph);
+        }
+    }
+    // Fallback: load from index.json
+    gitnova_storage::json_export::import_graph(&repo.join(".gitnova/index.json"))
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
