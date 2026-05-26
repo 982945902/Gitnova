@@ -192,16 +192,12 @@ pub fn impact_analysis(graph: &CodeGraph, symbol: &str, limit: usize) -> ImpactA
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([target.id.clone()]);
     while let Some(current) = queue.pop_front() {
-        for edge in graph.edges.iter().filter(|edge| {
-            edge.to == current
-                && matches!(
-                    edge.kind,
-                    EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports | EdgeKind::Defines | EdgeKind::Extends
-                )
-        }) {
+        // Follow ALL reverse edges (who points TO current) — match graph_context's approach
+        for edge in graph.edges.iter().filter(|edge| edge.to == current) {
             if seen.insert(edge.from.clone()) {
                 if let Some(node) = by_id.get(edge.from.as_str()) {
-                    if node.kind != NodeKind::Import {
+                    // Include all non-trivial nodes: skip Import, Repository
+                    if !matches!(node.kind, NodeKind::Import | NodeKind::Repository) {
                         impacted.push(digest(node));
                     }
                 }
@@ -211,13 +207,13 @@ pub fn impact_analysis(graph: &CodeGraph, symbol: &str, limit: usize) -> ImpactA
                 break;
             }
         }
-        // Also follow extends edges forward (child -> parent) to include parent class impact
+        // Also follow Extends forward (child → parent) to include parent class impact
         for edge in graph.edges.iter().filter(|e| {
             e.from == current && e.kind == EdgeKind::Extends
         }) {
             if seen.insert(edge.to.clone()) {
                 if let Some(node) = by_id.get(edge.to.as_str()) {
-                    if node.kind != NodeKind::Import {
+                    if !matches!(node.kind, NodeKind::Import | NodeKind::Repository) {
                         impacted.push(digest(node));
                     }
                 }
@@ -555,4 +551,70 @@ fn digest_list(digests: &[NodeDigest]) -> String {
         .map(|digest| format!("`{}`", digest.name))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::NodeMetrics;
+
+    fn make_node(id: &str, name: &str, kind: NodeKind) -> Node {
+        Node {
+            id: id.to_string(), kind, name: name.to_string(),
+            qualified_name: format!("lib.rs::{}", name), path: "lib.rs".to_string(),
+            span: None, language: None, text: String::new(),
+            tags: vec![], metrics: NodeMetrics::default(),
+        }
+    }
+
+    fn make_edge(from: &str, to: &str, kind: EdgeKind) -> Edge {
+        Edge { from: from.to_string(), to: to.to_string(), kind, confidence_basis_points: 10000 }
+    }
+
+    #[test]
+    fn impact_analysis_finds_reverse_dependencies() {
+        let graph = CodeGraph {
+            schema_version: 1, repo_root: String::new(), indexed_at_unix: 0,
+            nodes: vec![
+                make_node("caller", "caller_fn", NodeKind::Function),
+                make_node("filter", "Filter", NodeKind::Class),
+                make_node("user", "FilterUser", NodeKind::Function),
+            ],
+            edges: vec![
+                make_edge("caller", "filter", EdgeKind::Calls),
+                make_edge("user", "filter", EdgeKind::References),
+            ],
+        };
+
+        let result = impact_analysis(&graph, "Filter", 10);
+        assert!(result.symbol.is_some(), "Should find target node");
+        assert_eq!(result.symbol.as_ref().unwrap().name, "Filter");
+        assert!(!result.impacted.is_empty(),
+            "Should have impacted nodes, got 0");
+        let names: Vec<&str> = result.impacted.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"caller_fn"), "caller_fn should be impacted");
+        assert!(names.contains(&"FilterUser"), "FilterUser should be impacted");
+    }
+
+    #[test]
+    fn impact_analysis_transitive_finds_indirect_deps() {
+        let graph = CodeGraph {
+            schema_version: 1, repo_root: String::new(), indexed_at_unix: 0,
+            nodes: vec![
+                make_node("a", "A", NodeKind::Function),
+                make_node("b", "B", NodeKind::Function),
+                make_node("c", "C", NodeKind::Function),
+            ],
+            edges: vec![
+                make_edge("b", "a", EdgeKind::Calls),   // B calls A
+                make_edge("c", "b", EdgeKind::Calls),   // C calls B
+            ],
+        };
+
+        let result = impact_analysis(&graph, "A", 10);
+        // B directly calls A, C indirectly calls A via B
+        let names: Vec<&str> = result.impacted.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"B"), "B should be directly impacted");
+        assert!(names.contains(&"C"), "C should be transitively impacted");
+    }
 }
