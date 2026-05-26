@@ -1,14 +1,21 @@
-//! GraphSAGE GNN model with policy head and scoring head for SeedER retrieval.
+//! Graph Transformer GNN with policy head and scoring head for SeedER retrieval.
 //!
-//! Architecture:
+//! Architecture (matches paper's modified SAN/Exphormer backbone):
 //!   Input: node_features [N, D_in] + adjacency + query_embedding [D_in]
-//!   Per layer: h = LayerNorm(ReLU(W_self·h + W_nei·mean(h[u] for u in N(v)) + W_q·q))
-//!   Policy head: Linear(D_hid, 1) → softmax over frontier
-//!   Scoring head: Linear(D_hid, 1) → sigmoid
+//!   Per layer:
+//!     1. Multi-head self-attention with optional edge bias
+//!     2. Query injection (learned projection added to each node)
+//!     3. Feed-forward network (Linear → ReLU → Linear)
+//!     4. Residual connections + LayerNorm after each sub-layer
+//!   Policy head:  g_θ(h_u, z_q) = Linear(concat(h_u, z_q)) → [N, 1]
+//!   Scoring head: ϕ_θ(h_v, z_q) = Linear(concat(h_v, z_q)) → sigmoid → [N, 1]
+//!
+//! The GNN operates on per-step induced subgraphs G_t[V_t ∪ U_t],
+//! not the full bounded subgraph.
 
+use candle_core::{Device, Result, Tensor};
 #[cfg(test)]
 use candle_core::DType;
-use candle_core::{Device, Result, Tensor};
 use candle_nn::{layer_norm, linear, Linear, LayerNorm, Module, VarBuilder};
 
 /// Trainer configuration matching inference SeedERConfig.
@@ -16,6 +23,8 @@ pub struct ModelConfig {
     pub input_dim: usize,
     pub hidden_dim: usize,
     pub num_layers: usize,
+    pub num_heads: usize,     // attention heads per layer
+    pub ff_dim: usize,         // feed-forward intermediate dim
     pub device: Device,
 }
 
@@ -25,56 +34,108 @@ impl Default for ModelConfig {
             input_dim: 64,
             hidden_dim: 128,
             num_layers: 3,
+            num_heads: 4,
+            ff_dim: 256,
             device: Device::Cpu,
         }
     }
 }
 
-/// One GraphSAGE convolution layer with query injection.
-struct SAGELayer {
-    self_linear: Linear,
-    neighbor_linear: Linear,
-    query_linear: Linear,
-    layer_norm: LayerNorm,
+/// One Graph Transformer layer.
+struct TransformerLayer {
+    // Self-attention
+    q_proj: Linear,      // hidden_dim → hidden_dim
+    k_proj: Linear,
+    v_proj: Linear,
+    out_proj: Linear,    // hidden_dim → hidden_dim
+    // Query injection
+    query_proj: Linear,  // hidden_dim → hidden_dim
+    // Feed-forward
+    ff1: Linear,         // hidden_dim → ff_dim
+    ff2: Linear,         // ff_dim → hidden_dim
+    // Layer norms (2: after attention, after FFN)
+    ln1: LayerNorm,
+    ln2: LayerNorm,
+    num_heads: usize,
+    head_dim: usize,
 }
 
-impl SAGELayer {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let self_linear = linear(dim, dim, vb.pp("self"))?;
-        let neighbor_linear = linear(dim, dim, vb.pp("neighbor"))?;
-        let query_linear = linear(dim, dim, vb.pp("query"))?;
-        let layer_norm = layer_norm(dim, 1e-5, vb.pp("ln"))?;
-        Ok(Self { self_linear, neighbor_linear, query_linear, layer_norm })
+impl TransformerLayer {
+    fn new(hidden_dim: usize, num_heads: usize, ff_dim: usize, vb: VarBuilder) -> Result<Self> {
+        let head_dim = hidden_dim / num_heads;
+        assert!(hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads");
+        Ok(Self {
+            q_proj: linear(hidden_dim, hidden_dim, vb.pp("q"))?,
+            k_proj: linear(hidden_dim, hidden_dim, vb.pp("k"))?,
+            v_proj: linear(hidden_dim, hidden_dim, vb.pp("v"))?,
+            out_proj: linear(hidden_dim, hidden_dim, vb.pp("o"))?,
+            query_proj: linear(hidden_dim, hidden_dim, vb.pp("q_inj"))?,
+            ff1: linear(hidden_dim, ff_dim, vb.pp("ff1"))?,
+            ff2: linear(ff_dim, hidden_dim, vb.pp("ff2"))?,
+            ln1: layer_norm(hidden_dim, 1e-5, vb.pp("ln1"))?,
+            ln2: layer_norm(hidden_dim, 1e-5, vb.pp("ln2"))?,
+            num_heads,
+            head_dim,
+        })
     }
 
-    fn forward(
-        &self,
-        h: &Tensor,             // [N, D]
-        neighbor_mean: &Tensor, // [N, D]
-        query_emb: &Tensor,     // [1, D]
-    ) -> Result<Tensor> {
-        let h_self = self.self_linear.forward(h)?;
-        let h_nei = self.neighbor_linear.forward(neighbor_mean)?;
+    fn forward(&self, h: &Tensor, query_emb: &Tensor) -> Result<Tensor> {
         let n = h.dims()[0];
         let d = h.dims()[1];
-        let query_broadcast = self.query_linear.forward(query_emb)?.expand((n, d))?;
-        let combined = h_self.add(&h_nei)?.add(&query_broadcast)?;
-        let activated = combined.relu()?;
-        self.layer_norm.forward(&activated)
+
+        // ── Multi-head self-attention ──
+        let q = self.q_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+        let k = self.k_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+        let v = self.v_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+
+        // QK^T: [N, H, D_h] × [N, H, D_h]ᵀ via transpose
+        // q: [N, H, D_h] → need [H, N, D_h] for bmm
+        let q_t = q.permute((1, 0, 2))?; // [H, N, D_h]
+        let k_t = k.permute((1, 0, 2))?; // [H, N, D_h]
+        let v_t = v.permute((1, 0, 2))?; // [H, N, D_h]
+
+        // Scale dot-product attention
+        let scale = (self.head_dim as f64).sqrt();
+        let attn_scores = q_t.matmul(&k_t.transpose(1, 2)?)?; // [H, N, N]
+        let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
+        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_scores)?; // [H, N, N]
+        let attn_out = attn_weights.matmul(&v_t)?; // [H, N, D_h]
+        let attn_out = attn_out.permute((1, 0, 2))?; // [N, H, D_h]
+        let attn_out = attn_out.reshape((n, d))?; // [N, D]
+        let attn_out = self.out_proj.forward(&attn_out)?;
+
+        // ── Residual + LayerNorm ──
+        let h = self.ln1.forward(&h.add(&attn_out)?)?;
+
+        // ── Query injection ──
+        let q_inj = self.query_proj.forward(query_emb)?; // [1, D]
+        let q_broadcast = q_inj.expand((n, d))?;
+        let h = h.add(&q_broadcast)?;
+
+        // ── Feed-forward ──
+        let ff = self.ff2.forward(&self.ff1.forward(&h)?.relu()?)?;
+        let h = self.ln2.forward(&h.add(&ff)?)?;
+
+        Ok(h)
     }
 }
 
-/// GraphSAGE model with policy head and scoring head.
-pub struct GraphSAGEModel {
-    input_proj: Option<Linear>,       // input_dim → hidden_dim (None if dims match)
-    sage_layers: Vec<SAGELayer>,
-    policy_head: Linear,              // hidden_dim → 1
-    scoring_head: Linear,             // hidden_dim → 1
+/// Graph Transformer model with policy head and scoring head.
+pub struct GraphTransformerModel {
+    input_proj: Option<Linear>,         // input_dim → hidden_dim (None if dims match)
+    layers: Vec<TransformerLayer>,
+    // Policy head: g_θ(h_u, z_q) — explicit dual input
+    policy_proj_h: Linear,              // hidden_dim → hidden_dim
+    policy_proj_q: Linear,              // hidden_dim → hidden_dim
+    policy_out: Linear,                 // hidden_dim → 1
+    // Scoring head: ϕ_θ(h_v, z_q) — explicit dual input
+    scoring_proj_h: Linear,             // hidden_dim → hidden_dim
+    scoring_proj_q: Linear,             // hidden_dim → hidden_dim
+    scoring_out: Linear,                // hidden_dim → 1
     config: ModelConfig,
 }
 
-impl GraphSAGEModel {
-    /// Create a new randomly-initialized model.
+impl GraphTransformerModel {
     pub fn new(config: &ModelConfig, vb: VarBuilder) -> Result<Self> {
         let input_proj = if config.input_dim != config.hidden_dim {
             Some(linear(config.input_dim, config.hidden_dim, vb.pp("input_proj"))?)
@@ -82,130 +143,117 @@ impl GraphSAGEModel {
             None
         };
 
-        let mut sage_layers = Vec::with_capacity(config.num_layers);
+        let mut layers = Vec::with_capacity(config.num_layers);
         for i in 0..config.num_layers {
-            sage_layers.push(SAGELayer::new(config.hidden_dim, vb.pp(format!("sage_{i}")))?);
+            layers.push(TransformerLayer::new(
+                config.hidden_dim, config.num_heads, config.ff_dim,
+                vb.pp(format!("layer_{i}")),
+            )?);
         }
-
-        let policy_head = linear(config.hidden_dim, 1, vb.pp("policy_head"))?;
-        let scoring_head = linear(config.hidden_dim, 1, vb.pp("scoring_head"))?;
 
         Ok(Self {
             input_proj,
-            sage_layers,
-            policy_head,
-            scoring_head,
+            layers,
+            policy_proj_h: linear(config.hidden_dim, config.hidden_dim, vb.pp("pol_h"))?,
+            policy_proj_q: linear(config.hidden_dim, config.hidden_dim, vb.pp("pol_q"))?,
+            policy_out: linear(config.hidden_dim, 1, vb.pp("pol_out"))?,
+            scoring_proj_h: linear(config.hidden_dim, config.hidden_dim, vb.pp("sc_h"))?,
+            scoring_proj_q: linear(config.hidden_dim, config.hidden_dim, vb.pp("sc_q"))?,
+            scoring_out: linear(config.hidden_dim, 1, vb.pp("sc_out"))?,
             config: ModelConfig {
                 input_dim: config.input_dim,
                 hidden_dim: config.hidden_dim,
                 num_layers: config.num_layers,
+                num_heads: config.num_heads,
+                ff_dim: config.ff_dim,
                 device: vb.device().clone(),
             },
         })
     }
 
-    /// Full forward pass: node embeddings → hidden states.
+    /// Full forward pass on induced subgraph G_t[V_t ∪ U_t].
     ///
     /// Returns (hidden_states [N, D_hid], policy_logits [N, 1], scores [N, 1]).
     pub fn forward(
         &self,
-        node_features: &Tensor,  // [N, D_in]
-        adjacency: &[Vec<usize>], // neighbor indices per node
+        node_features: &Tensor,  // [N, D_in] — only V_t ∪ U_t nodes
         query_embedding: &Tensor, // [D_in]
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let n = node_features.dims()[0];
-        let q = query_embedding.unsqueeze(0)?; // [1, D_in]
 
-        // Optional input projection
+        // Input projection
         let mut h = match &self.input_proj {
             Some(proj) => proj.forward(node_features)?,
             None => node_features.clone(),
         };
 
-        // Build dense adjacency matrix for neighbor mean aggregation: [N, N]
-        let adj_matrix = self.build_adj_matrix(adjacency, n)?;
+        // Project query to hidden dim once
+        let q: Tensor = match &self.input_proj {
+            Some(proj) => proj.forward(&query_embedding.unsqueeze(0)?)?,
+            None => query_embedding.unsqueeze(0)?,
+        };
 
-        for layer in &self.sage_layers {
-            // Neighbor mean: adj_matrix @ h → [N, D]
-            let neighbor_mean = adj_matrix.matmul(&h)?;
-            // Project query embedding: reuse input_proj if present
-            let q_proj = match &self.input_proj {
-                Some(proj) => proj.forward(&q)?,
-                None => q.clone(),
-            };
-            h = layer.forward(&h, &neighbor_mean, &q_proj)?;
+        // Transformer layers
+        for layer in &self.layers {
+            h = layer.forward(&h, &q)?;
         }
 
-        let policy_logits = self.policy_head.forward(&h)?;   // [N, 1]
-        let scores = candle_nn::ops::sigmoid(&self.scoring_head.forward(&h)?)?; // [N, 1]
+        // ── Policy head: g_θ(h_u, z_q) ──
+        let h_pol = self.policy_proj_h.forward(&h)?;
+        let q_pol = self.policy_proj_q.forward(&q)?.expand((n, self.config.hidden_dim))?;
+        let policy_logits = self.policy_out.forward(&(h_pol.add(&q_pol)?.relu()?))?;
+
+        // ── Scoring head: ϕ_θ(h_v, z_q) ──
+        let h_sc = self.scoring_proj_h.forward(&h)?;
+        let q_sc = self.scoring_proj_q.forward(&q)?.expand((n, self.config.hidden_dim))?;
+        let scores = candle_nn::ops::sigmoid(&self.scoring_out.forward(&(h_sc.add(&q_sc)?.relu()?))?)?;
 
         Ok((h, policy_logits, scores))
     }
 
-    /// Greedy frontier expansion: pick top-c nodes by policy logits.
+    /// Greedy frontier expansion: score frontier, pick top-c.
+    /// `frontier` contains indices into the current induced subgraph nodes.
     pub fn expand_step(
         &self,
-        node_features: &Tensor,
-        adjacency: &[Vec<usize>],
-        query_embedding: &Tensor,
-        frontier: &[usize],
+        node_features: &Tensor,    // [N, D_in] — V_t ∪ U_t
+        query_embedding: &Tensor,  // [D_in]
+        frontier: &[usize],        // indices within node_features
         top_c: usize,
     ) -> Result<(Vec<usize>, Tensor)> {
         let (_h, policy_logits, _scores) =
-            self.forward(node_features, adjacency, query_embedding)?;
+            self.forward(node_features, query_embedding)?;
 
-        // Gather logits for frontier nodes only
-        let _n = node_features.dims()[0];
         let frontier_indices = Tensor::from_vec(
             frontier.iter().map(|&i| i as i64).collect::<Vec<_>>(),
             frontier.len(),
             &self.config.device,
         )?;
-        let frontier_logits = policy_logits.index_select(&frontier_indices, 0)?; // [F, 1]
+        let frontier_logits = policy_logits.index_select(&frontier_indices, 0)?;
 
-        // Flatten and sort descending
         let flat: Vec<f32> = frontier_logits.flatten_all()?.to_vec1()?;
         let mut indexed: Vec<(usize, f32)> = frontier.iter().copied().zip(flat).collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let selected: Vec<usize> = indexed.iter().take(top_c).map(|(i, _)| *i).collect();
-
-        // Return selected indices
         Ok((selected, frontier_logits))
-    }
-
-    /// Build a normalized adjacency matrix [N, N] for mean neighbor aggregation.
-    fn build_adj_matrix(&self, adjacency: &[Vec<usize>], n: usize) -> Result<Tensor> {
-        let mut data = vec![0.0f32; n * n];
-        for (i, neighbors) in adjacency.iter().enumerate() {
-            if !neighbors.is_empty() {
-                let weight = 1.0 / neighbors.len() as f32;
-                for &j in neighbors {
-                    data[i * n + j] = weight;
-                }
-            }
-        }
-        Tensor::from_vec(data, (n, n), &self.config.device)
     }
 
     /// Compute frontier policy distribution (softmax over frontier logits).
     pub fn frontier_policy(
         &self,
         node_features: &Tensor,
-        adjacency: &[Vec<usize>],
         query_embedding: &Tensor,
         frontier: &[usize],
     ) -> Result<Tensor> {
-        // For small subgraphs, do full forward. For efficiency could cache hidden states.
         let (_h, policy_logits, _scores) =
-            self.forward(node_features, adjacency, query_embedding)?;
+            self.forward(node_features, query_embedding)?;
 
         let frontier_indices = Tensor::from_vec(
             frontier.iter().map(|&i| i as i64).collect::<Vec<_>>(),
             frontier.len(),
             &self.config.device,
         )?;
-        let frontier_logits = policy_logits.index_select(&frontier_indices, 0)?; // [F, 1]
+        let frontier_logits = policy_logits.index_select(&frontier_indices, 0)?;
         candle_nn::ops::softmax_last_dim(&frontier_logits)
     }
 
@@ -213,10 +261,9 @@ impl GraphSAGEModel {
     pub fn score_nodes(
         &self,
         node_features: &Tensor,
-        adjacency: &[Vec<usize>],
         query_embedding: &Tensor,
     ) -> Result<Vec<f32>> {
-        let (_h, _policy, scores) = self.forward(node_features, adjacency, query_embedding)?;
+        let (_h, _policy, scores) = self.forward(node_features, query_embedding)?;
         scores.flatten_all()?.to_vec1()
     }
 
@@ -240,25 +287,19 @@ mod tests {
             input_dim: 8,
             hidden_dim: 16,
             num_layers: 2,
+            num_heads: 4,
+            ff_dim: 32,
             device: Device::Cpu,
         };
 
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &config.device);
-        let model = GraphSAGEModel::new(&config, vb).unwrap();
+        let model = GraphTransformerModel::new(&config, vb).unwrap();
 
-        // 5 nodes, 8-dim features
         let features = Tensor::randn(0f32, 1f32, (5, 8), &config.device).unwrap();
         let query = Tensor::randn(0f32, 1f32, 8, &config.device).unwrap();
-        let adj: Vec<Vec<usize>> = vec![
-            vec![1, 2],
-            vec![0, 3],
-            vec![0],
-            vec![1, 4],
-            vec![3],
-        ];
 
-        let (h, policy_logits, scores) = model.forward(&features, &adj, &query).unwrap();
+        let (h, policy_logits, scores) = model.forward(&features, &query).unwrap();
         assert_eq!(h.dims(), &[5, 16]);
         assert_eq!(policy_logits.dims(), &[5, 1]);
         assert_eq!(scores.dims(), &[5, 1]);
@@ -270,20 +311,21 @@ mod tests {
             input_dim: 4,
             hidden_dim: 8,
             num_layers: 1,
+            num_heads: 2,
+            ff_dim: 16,
             device: Device::Cpu,
         };
 
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &config.device);
-        let model = GraphSAGEModel::new(&config, vb).unwrap();
+        let model = GraphTransformerModel::new(&config, vb).unwrap();
 
         let features = Tensor::ones((3, 4), DType::F32, &config.device).unwrap();
         let query = Tensor::ones(4, DType::F32, &config.device).unwrap();
-        let adj: Vec<Vec<usize>> = vec![vec![1], vec![0, 2], vec![1]];
-        let frontier = vec![1, 2];
+        let frontier = vec![1usize, 2];
 
         let (selected, _) = model
-            .expand_step(&features, &adj, &query, &frontier, 1)
+            .expand_step(&features, &query, &frontier, 1)
             .unwrap();
         assert_eq!(selected.len(), 1);
     }
