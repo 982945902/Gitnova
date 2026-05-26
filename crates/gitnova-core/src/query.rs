@@ -305,12 +305,30 @@ pub fn graph_context(
         .filter(|edge| selected.contains(&edge.from) && selected.contains(&edge.to))
         .cloned()
         .collect::<Vec<_>>();
-    let incoming = graph
+    let mut incoming = graph
         .edges
         .iter()
         .filter(|edge| edge.to == target.id)
         .filter_map(|edge| by_id.get(edge.from.as_str()).map(|node| digest(node)))
         .collect::<Vec<_>>();
+    // For Class/Struct targets, also follow edges to co-located symbols
+    // e.g., who calls methods defined in the same file → impacted when class changes
+    if incoming.len() <= 1 && matches!(target.kind,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface | NodeKind::Enum)
+    {
+        let co_located: Vec<&str> = graph.nodes.iter()
+            .filter(|n| n.path == target.path && n.id != target.id
+                && !matches!(n.kind, NodeKind::Repository | NodeKind::File | NodeKind::Import))
+            .map(|n| n.id.as_str())
+            .collect();
+        for col_id in &co_located {
+            let extras: Vec<NodeDigest> = graph.edges.iter()
+                .filter(|e| e.to == *col_id)
+                .filter_map(|e| by_id.get(e.from.as_str()).map(|n| digest(n)))
+                .collect();
+            incoming.extend(extras);
+        }
+    }
     let outgoing = graph
         .edges
         .iter()
@@ -399,17 +417,20 @@ pub fn architecture_map(graph: &CodeGraph, focus: Option<&str>) -> ArchitectureM
 
 pub fn find_symbol<'a>(graph: &'a CodeGraph, symbol: &str) -> Option<&'a Node> {
     let symbol_lower = symbol.to_ascii_lowercase();
-    graph.nodes.iter().find(|node| {
-        !matches!(
-            node.kind,
-            NodeKind::Repository | NodeKind::File | NodeKind::Import
-        ) && (node.name.eq_ignore_ascii_case(symbol)
-            || node.qualified_name.eq_ignore_ascii_case(symbol)
-            || node
-                .qualified_name
-                .to_ascii_lowercase()
-                .contains(&symbol_lower))
-    })
+    // Priority: prefer structural types (Class, Struct, etc.) over functions/methods
+    // This ensures "Filter" matches the class, not a method named "filter"
+    let pred = |node: &&Node| -> bool {
+        !matches!(node.kind, NodeKind::Repository | NodeKind::File | NodeKind::Import)
+            && (node.name.eq_ignore_ascii_case(symbol)
+                || node.qualified_name.eq_ignore_ascii_case(symbol)
+                || node.qualified_name.to_ascii_lowercase().contains(&symbol_lower))
+    };
+    let is_structural = |kind: &NodeKind| -> bool {
+        matches!(kind, NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface | NodeKind::Enum | NodeKind::Union)
+    };
+    // First pass: prefer structural types
+    graph.nodes.iter().find(|n| pred(n) && is_structural(&n.kind))
+        .or_else(|| graph.nodes.iter().find(|n| pred(n)))
 }
 
 pub fn find_node<'a>(graph: &'a CodeGraph, selector: &str) -> Option<&'a Node> {
