@@ -1,0 +1,196 @@
+//! Deterministic seed + expand retrieval for inference.
+
+use crate::model::GraphSAGEModel;
+use crate::subgraph::{compute_frontier, extract_subgraph};
+use candle_core::{Device, Tensor};
+use gitnova_core::model::{CodeGraph, NodeKind};
+use std::collections::{HashMap, HashSet};
+
+/// Run SeedER-style retrieved at inference time (greedy, deterministic).
+///
+/// Returns ranked node IDs.
+pub fn seed_expand_retrieve(
+    model: &GraphSAGEModel,
+    graph: &CodeGraph,
+    query_embedding: &[f32],
+    node_embeddings: &HashMap<String, Vec<f32>>,
+    k_seed: usize,
+    expand_steps: usize,
+    frontier_select: usize,
+    subgraph_max_nodes: usize,
+    subgraph_hops: usize,
+    limit: usize,
+) -> Vec<String> {
+    let device = model.device();
+    let config = model.config();
+
+    // Build node lookup
+    let node_lookup: HashMap<&str, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+
+    // Step 1: Seed — top-k cosine similarity
+    let seed_ids = seeding_retrieve(
+        query_embedding,
+        node_embeddings,
+        graph,
+        &node_lookup,
+        k_seed,
+    );
+
+    if seed_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 2: Extract bounded subgraph
+    let subgraph = extract_subgraph(graph, &seed_ids, subgraph_max_nodes, subgraph_hops);
+
+    if subgraph.node_ids.is_empty() {
+        return seed_ids;
+    }
+
+    // Step 3: Build feature tensor
+    let features = match build_feature_tensor(
+        &subgraph.node_index,
+        graph,
+        node_embeddings,
+        config.input_dim,
+        device,
+    ) {
+        Ok(f) => f,
+        Err(_) => return seed_ids,
+    };
+
+    let query_tensor = match Tensor::from_vec(
+        query_embedding.to_vec(),
+        query_embedding.len(),
+        device,
+    ) {
+        Ok(q) => q,
+        Err(_) => return seed_ids,
+    };
+
+    // Step 4: Iterative greedy expansion
+    let mut selected: HashSet<usize> = subgraph.seed_indices.iter().copied().collect();
+    let mut frontier = subgraph.frontier.clone();
+
+    for _step in 0..expand_steps {
+        if frontier.is_empty() {
+            break;
+        }
+
+        let (picked, _) = match model.expand_step(
+            &features,
+            &subgraph.adjacency,
+            &query_tensor,
+            &frontier,
+            frontier_select.min(frontier.len()),
+        ) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+
+        for &idx in &picked {
+            selected.insert(idx);
+        }
+
+        frontier = compute_frontier(&subgraph.adjacency, &selected);
+    }
+
+    // Step 5: Score all nodes and rank
+    let scores = match model.score_nodes(&features, &subgraph.adjacency, &query_tensor) {
+        Ok(s) => s,
+        Err(_) => return subgraph.node_ids.iter().take(limit).cloned().collect(),
+    };
+
+    // Collect all node IDs with their scores
+    let mut ranked: Vec<(f32, &str)> = subgraph
+        .node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (scores.get(i).copied().unwrap_or(0.0), id.as_str()))
+        .collect();
+
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(_, id)| id.to_string()).collect()
+}
+
+/// Top-k node retrieval via cosine similarity on pre-computed embeddings.
+fn seeding_retrieve(
+    query_emb: &[f32],
+    node_embeddings: &HashMap<String, Vec<f32>>,
+    graph: &CodeGraph,
+    _node_lookup: &HashMap<&str, usize>,
+    k: usize,
+) -> Vec<String> {
+    let mut scored: Vec<(f64, String)> = Vec::new();
+
+    for node in &graph.nodes {
+        if matches!(node.kind, NodeKind::Repository | NodeKind::File | NodeKind::Import) {
+            continue;
+        }
+        if let Some(emb) = node_embeddings.get(&node.id) {
+            let sim = cosine_similarity(query_emb, emb);
+            scored.push((sim, node.id.clone()));
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    scored.into_iter().map(|(_, id)| id).collect()
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let (dot, norm_a, norm_b) =
+        a[..len]
+            .iter()
+            .zip(&b[..len])
+            .fold((0.0f64, 0.0f64, 0.0f64), |(d, na, nb), (&x, &y)| {
+                (
+                    d + x as f64 * y as f64,
+                    na + x as f64 * x as f64,
+                    nb + y as f64 * y as f64,
+                )
+            });
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+fn build_feature_tensor(
+    node_indices: &[usize],
+    graph: &CodeGraph,
+    node_embeddings: &HashMap<String, Vec<f32>>,
+    dim: usize,
+    device: &Device,
+) -> Result<Tensor, candle_core::Error> {
+    let mut data = Vec::with_capacity(node_indices.len() * dim);
+    for &global_idx in node_indices {
+        let node_id = &graph.nodes[global_idx].id;
+        match node_embeddings.get(node_id) {
+            Some(emb) => {
+                for &v in emb.iter().take(dim) {
+                    data.push(v);
+                }
+                for _ in emb.len()..dim {
+                    data.push(0.0);
+                }
+            }
+            None => {
+                for _ in 0..dim {
+                    data.push(0.0);
+                }
+            }
+        }
+    }
+    Tensor::from_vec(data, (node_indices.len(), dim), device)
+}

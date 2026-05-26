@@ -41,6 +41,10 @@ enum Commands {
     Embeddings(EmbeddingsArgs),
     Dashboard(DashboardArgs),
     Serve,
+    #[command(name = "train")]
+    Train(TrainArgs),
+    #[command(name = "retrieve-graph")]
+    RetrieveGraph(RetrieveGraphArgs),
 }
 
 #[derive(Args)]
@@ -137,6 +141,29 @@ struct EmbeddingBuildArgs {
     provider: String,
 }
 
+#[derive(Args)]
+struct TrainArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long, default_value = "local-hash")]
+    provider: String,
+    #[arg(long, default_value_t = 50)]
+    epochs: usize,
+    #[arg(long)]
+    model: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct RetrieveGraphArgs {
+    query: String,
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+    #[arg(long)]
+    model: Option<PathBuf>,
+}
+
 #[derive(Debug, Serialize)]
 struct IndexReport {
     status: &'static str,
@@ -229,6 +256,81 @@ async fn main() -> Result<()> {
         },
         Commands::Dashboard(args) => {
             gitnova_dashboard::run_dashboard(args.repo, args.port).await?;
+        }
+        Commands::Train(args) => {
+            let graph = load_graph_with_fallback(&args.repo)?;
+            let store = GitnovaStore::open(&args.repo)?;
+            let embeddings = store.load_embeddings(&args.provider).unwrap_or_default();
+
+            if embeddings.is_empty() {
+                eprintln!("No embeddings found for provider '{}'. Build them first with: gitnova embeddings build --repo <path>", args.provider);
+                std::process::exit(1);
+            }
+
+            let examples = gitnova_train::data::generate_training_examples(
+                &graph, &embeddings, &args.provider, 2000,
+            )?;
+
+            if examples.is_empty() {
+                eprintln!("No training examples could be generated from the graph. Ensure the repo has been indexed.");
+                std::process::exit(1);
+            }
+
+            eprintln!("Generated {} training examples", examples.len());
+
+            let model_config = gitnova_train::ModelConfig {
+                input_dim: embeddings.values().next().map(|v| v.len()).unwrap_or(64),
+                ..Default::default()
+            };
+            let train_config = gitnova_train::training::TrainConfig {
+                epochs: args.epochs,
+                ..Default::default()
+            };
+
+            let save_path = args
+                .model
+                .unwrap_or_else(|| args.repo.join(".gitnova/model/model.safetensors"));
+
+            gitnova_train::train_and_save(
+                &examples, &graph, &embeddings,
+                &model_config, &train_config, &save_path,
+            )?;
+
+            eprintln!("Model saved to {}", save_path.display());
+        }
+        Commands::RetrieveGraph(args) => {
+            let graph = load_graph_with_fallback(&args.repo)?;
+            let store = GitnovaStore::open(&args.repo)?;
+            let embeddings = store.load_embeddings("local-hash").unwrap_or_default();
+
+            let model_path = args
+                .model
+                .unwrap_or_else(|| args.repo.join(".gitnova/model/model.safetensors"));
+
+            if !model_path.exists() {
+                eprintln!(
+                    "No trained model found at {}. Train one with: gitnova train --repo <path>",
+                    model_path.display()
+                );
+                eprintln!("Falling back to dense embedding retrieval.");
+                let results = embeddings::search_embeddings(
+                    &graph, &embeddings, &args.query, args.limit,
+                );
+                print_json(&results)?;
+                return Ok(());
+            }
+
+            let model_config = gitnova_train::ModelConfig {
+                input_dim: embeddings.values().next().map(|v| v.len()).unwrap_or(64),
+                ..Default::default()
+            };
+            let retriever = gitnova_train::SeedERRetriever::load(
+                &model_path, &model_config, Default::default(),
+            )?;
+
+            let query_vec = embeddings::embed_text(&args.query);
+            let results = retriever.retrieve(&graph, &query_vec, &embeddings, args.limit);
+            print_json(&results)?;
         }
         Commands::Serve => {
             gitnova_mcp::serve_stdio().await?;

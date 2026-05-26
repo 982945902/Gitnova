@@ -6,7 +6,8 @@ members = [
     "crates/gitnova-enrich",
     "crates/gitnova-mcp",
     "crates/gitnova-dashboard",
-    "crates/gitnova-cli"
+    "crates/gitnova-cli",
+    "crates/gitnova-train"
 ]
 resolver = "2"
 

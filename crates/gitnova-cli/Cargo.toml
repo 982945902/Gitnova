@@ -13,6 +13,7 @@ gitnova-enrich = { path = "../gitnova-enrich" }
 gitnova-mcp = { path = "../gitnova-mcp" }
 gitnova-rank = { path = "../gitnova-rank" }
 gitnova-storage = { path = "../gitnova-storage" }
+gitnova-train = { path = "../gitnova-train" }
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
