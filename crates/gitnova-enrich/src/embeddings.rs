@@ -27,9 +27,13 @@ fn get_model2vec() -> anyhow::Result<std::sync::MutexGuard<'static, Option<model
     if guard.is_none() {
         let model_id = std::env::var("GITNOVA_MODEL2VEC_MODEL")
             .unwrap_or_else(|_| "minishlab/potion-base-8M".to_string());
-        eprintln!("Loading model2vec model '{}'...", model_id);
+        eprintln!("Loading model2vec model '{}' (first use, ~30MB download)...", model_id);
         let model = model2vec_rs::model::StaticModel::from_pretrained(&model_id, None, None, None)
-            .map_err(|e| anyhow::anyhow!("Failed to load model2vec model '{}': {}", model_id, e))?;
+            .map_err(|e| {
+                eprintln!("model2vec load failed: {}. Run 'gitnova embeddings build --provider local-hash' for offline use, or set GITNOVA_MODEL2VEC_MODEL to a local path.", e);
+                anyhow::anyhow!("{}", e)
+            })?;
+        eprintln!("model2vec loaded successfully.");
         *guard = Some(model);
     }
     Ok(guard)
@@ -108,7 +112,13 @@ pub fn similarity_map(
     vectors: &HashMap<String, Vec<f32>>,
     query: &str,
 ) -> HashMap<String, f64> {
-    similarity_map_for_provider(graph, vectors, query, LOCAL_HASH_PROVIDER).unwrap_or_default()
+    match similarity_map_for_provider(graph, vectors, query, MODEL2VEC_PROVIDER) {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("model2vec unavailable ({}), falling back to local-hash", e);
+            similarity_map_for_provider(graph, vectors, query, LOCAL_HASH_PROVIDER).unwrap_or_default()
+        }
+    }
 }
 
 pub fn similarity_map_for_provider(

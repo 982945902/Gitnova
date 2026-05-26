@@ -1,6 +1,6 @@
 use anyhow::Result;
 use gitnova_core::{build_graph_from_entries, query, scan_repository, CodeGraph};
-use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
+use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER, MODEL2VEC_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::llm;
 use gitnova_enrich::lsp::apply_lsp_metadata;
@@ -119,7 +119,7 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             with_store(repo_state, |store| {
                 let graph = store.load_graph()?;
                 let vectors = store
-                    .load_embeddings(LOCAL_HASH_PROVIDER)
+                    .load_embeddings(MODEL2VEC_PROVIDER)
                     .unwrap_or_default();
                 let similarities = if vectors.is_empty() {
                     None
@@ -246,7 +246,7 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
             let provider = arguments
                 .get("provider")
                 .and_then(Value::as_str)
-                .unwrap_or(LOCAL_HASH_PROVIDER);
+                .unwrap_or(MODEL2VEC_PROVIDER);
             with_store(repo_state, |store| {
                 let graph = store.load_graph()?;
                 let vectors = store.load_embeddings(provider)?;

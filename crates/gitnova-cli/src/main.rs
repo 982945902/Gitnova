@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
-use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER};
+use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER, MODEL2VEC_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_fts};
@@ -67,6 +67,8 @@ struct RankArgs {
     repo: PathBuf,
     #[arg(long, default_value_t = 10)]
     limit: usize,
+    #[arg(long, default_value = MODEL2VEC_PROVIDER)]
+    provider: String,
 }
 
 #[derive(Args)]
@@ -137,7 +139,7 @@ enum EmbeddingCommands {
 struct EmbeddingBuildArgs {
     #[arg(long)]
     repo: PathBuf,
-    #[arg(long, default_value = LOCAL_HASH_PROVIDER)]
+    #[arg(long, default_value = MODEL2VEC_PROVIDER)]
     provider: String,
 }
 
@@ -145,7 +147,7 @@ struct EmbeddingBuildArgs {
 struct TrainArgs {
     #[arg(long)]
     repo: PathBuf,
-    #[arg(long, default_value = "local-hash")]
+    #[arg(long, default_value = MODEL2VEC_PROVIDER)]
     provider: String,
     #[arg(long, default_value_t = 50)]
     epochs: usize,
@@ -194,7 +196,7 @@ async fn main() -> Result<()> {
             let graph = load_graph_with_fallback(&args.repo)?;
             let vectors = GitnovaStore::open(&args.repo)
                 .ok()
-                .and_then(|s| s.load_embeddings(LOCAL_HASH_PROVIDER).ok())
+                .and_then(|s| s.load_embeddings(&args.provider).ok())
                 .unwrap_or_default();
             let similarities = if vectors.is_empty() {
                 None
@@ -303,7 +305,7 @@ async fn main() -> Result<()> {
         Commands::RetrieveGraph(args) => {
             let graph = load_graph_with_fallback(&args.repo)?;
             let store = GitnovaStore::open(&args.repo)?;
-            let embeddings = store.load_embeddings("local-hash").unwrap_or_default();
+            let embeddings = store.load_embeddings(MODEL2VEC_PROVIDER).unwrap_or_default();
 
             let model_path = args
                 .model
