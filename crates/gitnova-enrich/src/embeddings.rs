@@ -11,8 +11,29 @@ use std::process::{Command, Stdio};
 pub const LOCAL_HASH_PROVIDER: &str = "local-hash";
 pub const LOCAL_SEMANTIC_PROVIDER: &str = "local-semantic";
 pub const NEURAL_COMMAND_PROVIDER: &str = "neural-command";
+pub const MODEL2VEC_PROVIDER: &str = "model2vec";
 const DIMENSIONS: usize = 64;
 const SEMANTIC_DIMENSIONS: usize = 96;
+
+// Lazy-loaded model2vec model
+use std::sync::{Mutex, OnceLock};
+fn model2vec_model() -> &'static Mutex<Option<model2vec_rs::model::StaticModel>> {
+    static MODEL: OnceLock<Mutex<Option<model2vec_rs::model::StaticModel>>> = OnceLock::new();
+    MODEL.get_or_init(|| Mutex::new(None))
+}
+
+fn get_model2vec() -> anyhow::Result<std::sync::MutexGuard<'static, Option<model2vec_rs::model::StaticModel>>> {
+    let mut guard = model2vec_model().lock().unwrap();
+    if guard.is_none() {
+        let model_id = std::env::var("GITNOVA_MODEL2VEC_MODEL")
+            .unwrap_or_else(|_| "minishlab/potion-base-8M".to_string());
+        eprintln!("Loading model2vec model '{}'...", model_id);
+        let model = model2vec_rs::model::StaticModel::from_pretrained(&model_id, None, None, None)
+            .map_err(|e| anyhow::anyhow!("Failed to load model2vec model '{}': {}", model_id, e))?;
+        *guard = Some(model);
+    }
+    Ok(guard)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingSearchResult {
@@ -40,6 +61,24 @@ pub fn build_embeddings_with_command(
             Ok(build_embeddings_for_provider(graph, provider))
         }
         NEURAL_COMMAND_PROVIDER => build_neural_command_embeddings(graph, command),
+        MODEL2VEC_PROVIDER => {
+            let guard = get_model2vec()?;
+            let model = guard.as_ref().unwrap();
+            let ids: Vec<String> = graph.nodes.iter()
+                .filter(|n| !matches!(n.kind, NodeKind::Repository | NodeKind::Import))
+                .map(|n| n.id.clone())
+                .collect();
+            let texts: Vec<String> = graph.nodes.iter()
+                .filter(|n| !matches!(n.kind, NodeKind::Repository | NodeKind::Import))
+                .map(|n| format!("{} {} {} {:?}", n.qualified_name, n.path, n.text, n.kind))
+                .collect();
+            let vectors = model.encode(&texts);
+            Ok(ids.iter().zip(vectors).map(|(id, vec)| StoredEmbedding {
+                node_id: id.clone(),
+                provider: MODEL2VEC_PROVIDER.into(),
+                vector: vec,
+            }).collect())
+        }
         other => anyhow::bail!("unsupported embedding provider: {other}"),
     }
 }
@@ -96,6 +135,10 @@ pub fn similarity_map_for_provider_with_command(
 ) -> anyhow::Result<HashMap<String, f64>> {
     let query_vector = if provider == NEURAL_COMMAND_PROVIDER {
         embed_text_with_neural_command(query, command)?
+    } else if provider == MODEL2VEC_PROVIDER {
+        let guard = get_model2vec()?;
+        let model = guard.as_ref().unwrap();
+        model.encode(&[query.to_string()])[0].clone()
     } else {
         embed_text_for_provider(provider, query)?
     };
@@ -192,6 +235,11 @@ pub fn embed_text_for_provider(provider: &str, text: &str) -> anyhow::Result<Vec
         NEURAL_COMMAND_PROVIDER => {
             embed_text_with_neural_command(text, neural_command_from_env().as_deref())
         }
+        MODEL2VEC_PROVIDER => {
+            let guard = get_model2vec()?;
+            let model = guard.as_ref().unwrap();
+            Ok(model.encode(&[text.to_string()])[0].clone())
+        }
         other => anyhow::bail!("unsupported embedding provider: {other}"),
     }
 }
@@ -254,6 +302,16 @@ fn parse_vector_output(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
 
 fn neural_command_from_env() -> Option<std::path::PathBuf> {
     std::env::var_os("GITNOVA_EMBEDDING_COMMAND").map(std::path::PathBuf::from)
+}
+
+/// Get default embedding dimension for a provider.
+pub fn embedding_dim(provider: &str) -> usize {
+    match provider {
+        LOCAL_HASH_PROVIDER => DIMENSIONS,
+        LOCAL_SEMANTIC_PROVIDER => SEMANTIC_DIMENSIONS,
+        MODEL2VEC_PROVIDER => 256, // all potion models use 256-dim
+        _ => DIMENSIONS,
+    }
 }
 
 pub fn embed_text(text: &str) -> Vec<f32> {

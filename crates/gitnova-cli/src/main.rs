@@ -278,8 +278,10 @@ async fn main() -> Result<()> {
 
             eprintln!("Generated {} training examples", examples.len());
 
+            let dim = embeddings::embedding_dim(&args.provider);
             let model_config = gitnova_train::ModelConfig {
-                input_dim: embeddings.values().next().map(|v| v.len()).unwrap_or(64),
+                input_dim: dim,
+                hidden_dim: dim.max(128),
                 ..Default::default()
             };
             let train_config = gitnova_train::training::TrainConfig {
@@ -320,8 +322,10 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let dim = embeddings.values().next().map(|v| v.len()).unwrap_or(64);
             let model_config = gitnova_train::ModelConfig {
-                input_dim: embeddings.values().next().map(|v| v.len()).unwrap_or(64),
+                input_dim: dim,
+                hidden_dim: dim.max(128),
                 ..Default::default()
             };
             let retriever = gitnova_train::SeedERRetriever::load(
