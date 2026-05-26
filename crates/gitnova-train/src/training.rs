@@ -217,18 +217,9 @@ pub fn train(
                         frontier = compute_frontier(&subgraph.adjacency, &selected);
                     }
 
-                    // ── Reward: Recall@Any proxy ──
-                    let (_, _, scores) = match model.forward(
-                        &features, &subgraph.adjacency, &query_tensor,
-                    ) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let score_vec = scores.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-                    let reward: f32 = selected.iter()
-                        .filter(|&&i| pos_set.contains(&i))
-                        .map(|&i| score_vec.get(i).copied().unwrap_or(0.0))
-                        .sum();
+                    // ── Reward: Recall@Any (label-based, no model involvement) ──
+                    let hits = selected.iter().filter(|&&i| pos_set.contains(&i)).count();
+                    let reward = hits as f32 / pos_set.len().max(1) as f32;
 
                     if let Some(lp) = log_prob_sum {
                         trajectory_log_probs.push(lp);
