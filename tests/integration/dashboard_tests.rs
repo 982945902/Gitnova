@@ -70,6 +70,18 @@ fn get_text(port: u16, path: &str) -> Option<String> {
     response.split("\r\n\r\n").nth(1).map(str::to_string)
 }
 
+fn module_script_src(html: &str) -> Option<String> {
+    let marker = "type=\"module\"";
+    let script_index = html.find(marker)?;
+    let script_start = html[..script_index].rfind("<script")?;
+    let script_end = html[script_index..].find('>')? + script_index;
+    let script = &html[script_start..script_end];
+    let src_marker = "src=\"";
+    let src_start = script.find(src_marker)? + src_marker.len();
+    let src_end = script[src_start..].find('"')? + src_start;
+    Some(script[src_start..src_end].to_string())
+}
+
 #[test]
 fn dashboard_serves_summary_api() {
     let (_temp, repo) = temp_fixture("rust_sample");
@@ -246,8 +258,10 @@ fn dashboard_serves_graph_visualization_shell() {
     let mut app_js = None;
     while Instant::now() < deadline {
         if let Some(text) = get_text(port, "/") {
+            if let Some(src) = module_script_src(&text) {
+                app_js = get_text(port, &src);
+            }
             html = Some(text);
-            app_js = get_text(port, "/assets/app.js");
             if app_js.is_some() {
                 break;
             }
@@ -259,13 +273,11 @@ fn dashboard_serves_graph_visualization_shell() {
     child.wait().ok();
 
     let html = html.expect("dashboard index should respond");
-    assert!(html.contains("graph-canvas"));
-    assert!(html.contains("graph-labels"));
-    assert!(html.contains("Graph"));
-    assert!(html.contains("graph-filter"));
-    assert!(html.contains("graph-kind"));
-    assert!(html.contains("graph-zoom-in"));
+    assert!(html.contains("Gitnova Dashboard"));
+    assert!(html.contains("id=\"root\""));
+    assert!(html.contains("type=\"module\""));
+    assert!(html.contains("/assets/"));
 
     let app_js = app_js.expect("dashboard app js should respond");
-    assert!(app_js.contains("webgl"));
+    assert!(app_js.contains("Gitnova") || app_js.contains("three"));
 }

@@ -1,6 +1,7 @@
 use anyhow::Result;
-use axum::extract::{Query, State};
-use axum::response::{Html, IntoResponse};
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use gitnova_core::query;
@@ -9,9 +10,12 @@ use gitnova_rank::rank_graph;
 use gitnova_storage::SurrealStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+const DIST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web/dist");
 
 #[derive(Clone)]
 struct DashboardState {
@@ -47,8 +51,7 @@ pub async fn run_dashboard(repo_root: PathBuf, port: u16) -> Result<()> {
     };
     let app = Router::new()
         .route("/", get(index))
-        .route("/assets/app.js", get(app_js))
-        .route("/assets/styles.css", get(styles_css))
+        .route("/assets/{*path}", get(asset))
         .route("/api/summary", get(summary))
         .route("/api/nodes", get(nodes))
         .route("/api/edges", get(edges))
@@ -66,22 +69,59 @@ pub async fn run_dashboard(repo_root: PathBuf, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn index() -> impl IntoResponse {
-    Html(include_str!("../assets/index.html"))
+async fn index() -> Response {
+    if let Some(html) = read_dist_file("index.html") {
+        return Html(html).into_response();
+    }
+    Html(include_str!("../assets/index.html").to_string()).into_response()
 }
 
-async fn app_js() -> impl IntoResponse {
-    (
-        [("content-type", "application/javascript; charset=utf-8")],
-        include_str!("../assets/app.js"),
-    )
+async fn asset(AxumPath(path): AxumPath<String>) -> Response {
+    if let Some(bytes) = read_dist_bytes(&format!("assets/{path}")) {
+        return with_content_type(bytes, content_type_for(&path));
+    }
+    match path.as_str() {
+        "app.js" => (
+            [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+            include_str!("../assets/app.js").as_bytes().to_vec(),
+        )
+            .into_response(),
+        "styles.css" => (
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            include_str!("../assets/styles.css").as_bytes().to_vec(),
+        )
+            .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
-async fn styles_css() -> impl IntoResponse {
-    (
-        [("content-type", "text/css; charset=utf-8")],
-        include_str!("../assets/styles.css"),
-    )
+fn read_dist_file(path: &str) -> Option<String> {
+    fs::read_to_string(format!("{DIST_DIR}/{path}")).ok()
+}
+
+fn read_dist_bytes(path: &str) -> Option<Vec<u8>> {
+    fs::read(format!("{DIST_DIR}/{path}")).ok()
+}
+
+fn with_content_type(bytes: Vec<u8>, content_type: &'static str) -> Response {
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
+    response
+}
+
+fn content_type_for(path: &str) -> &'static str {
+    if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 async fn summary(State(state): State<DashboardState>) -> Json<Value> {
@@ -180,10 +220,20 @@ fn load_graph_value<F>(state: &DashboardState, f: F) -> Value
 where
     F: FnOnce(gitnova_core::CodeGraph) -> Value,
 {
-    match SurrealStore::open(state.repo_root.as_ref()).and_then(|store| store.load_graph()) {
+    match load_dashboard_graph(state) {
         Ok(graph) => f(graph),
         Err(err) => json!({ "error": err.to_string() }),
     }
+}
+
+fn load_dashboard_graph(state: &DashboardState) -> Result<gitnova_core::CodeGraph> {
+    SurrealStore::open(state.repo_root.as_ref())
+        .and_then(|store| store.load_graph())
+        .or_else(|_| {
+            gitnova_storage::json_export::import_graph(
+                &state.repo_root.join(".gitnova/index.json"),
+            )
+        })
 }
 
 fn selector_from_params(params: &ContextParams, graph: &gitnova_core::CodeGraph) -> String {
