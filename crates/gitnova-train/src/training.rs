@@ -31,10 +31,10 @@ pub struct TrainConfig {
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
-            epochs: 50, batch_size: 4, learning_rate: 0.001,
+            epochs: 50, batch_size: 4, learning_rate: 0.005,
             num_trajectories: 8, expand_steps: 3, frontier_select: 5,
-            reinforce_weight: 1.0, bpr_weight: 0.1,
-            seed_k: 10, subgraph_max_nodes: 200, subgraph_hops: 2,
+            reinforce_weight: 1.0, bpr_weight: 0.5,
+            seed_k: 10, subgraph_max_nodes: 100, subgraph_hops: 2,
         }
     }
 }
@@ -190,8 +190,10 @@ pub fn train(
                 let bpr = bpr_raw.affine(train_config.bpr_weight, 0.0).unwrap();
                 let loss = rl_loss.add(&bpr).unwrap();
 
-                epoch_rl += rl_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0) as f64;
-                epoch_bpr += bpr_raw.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0) as f64;
+                let rl_val = rl_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0);
+                let bpr_val = bpr_raw.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0);
+                epoch_rl += rl_val as f64;
+                epoch_bpr += bpr_val as f64;
 
                 batch_loss = match batch_loss {
                     Some(bl) => Some(bl.add(&loss).unwrap()),
