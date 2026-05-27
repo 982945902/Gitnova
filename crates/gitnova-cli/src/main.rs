@@ -9,7 +9,7 @@ use gitnova_storage::{FileManifestEntry, GitnovaStore};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 
@@ -246,9 +246,15 @@ async fn main() -> Result<()> {
         Commands::Embeddings(args) => match args.command {
             EmbeddingCommands::Build(build) => {
                 let graph = load_graph_with_fallback(&build.repo)?;
-                let embeddings = embeddings::build_embeddings(&graph, &build.provider)?;
-                let count = embeddings.len();
-                if let Ok(store) = GitnovaStore::open(&build.repo) { let _ = store.save_embeddings(&embeddings); }
+                let embeddings_vec = embeddings::build_embeddings(&graph, &build.provider)?;
+                let count = embeddings_vec.len();
+                // Export to JSON file as reliable backup
+                let emb_map: HashMap<String, Vec<f32>> = embeddings_vec.iter()
+                    .map(|e| (e.node_id.clone(), e.vector.clone())).collect();
+                let _ = gitnova_storage::json_export::export_embeddings(
+                    &emb_map, &build.repo.join(".gitnova/embeddings.json"));
+                // Try SurrealDB (best-effort, may fail in nested runtime)
+                if let Ok(store) = GitnovaStore::open(&build.repo) { let _ = store.save_embeddings(&embeddings_vec); }
                 print_json(&json!({
                     "status": "built",
                     "provider": build.provider,
@@ -261,8 +267,14 @@ async fn main() -> Result<()> {
         }
         Commands::Train(args) => {
             let graph = load_graph_with_fallback(&args.repo)?;
-            let store = GitnovaStore::open(&args.repo)?;
-            let embeddings = store.load_embeddings(&args.provider).unwrap_or_default();
+            let embeddings = match GitnovaStore::open(&args.repo) {
+                Ok(store) => store.load_embeddings(&args.provider).unwrap_or_default(),
+                Err(_) => {
+                    // Fallback: load embeddings from JSON file
+                    gitnova_storage::json_export::import_embeddings(
+                        &args.repo.join(".gitnova/embeddings.json")).unwrap_or_default()
+                }
+            };
 
             if embeddings.is_empty() {
                 eprintln!("No embeddings found for provider '{}'. Build them first with: gitnova embeddings build --repo <path>", args.provider);
@@ -304,8 +316,11 @@ async fn main() -> Result<()> {
         }
         Commands::RetrieveGraph(args) => {
             let graph = load_graph_with_fallback(&args.repo)?;
-            let store = GitnovaStore::open(&args.repo)?;
-            let embeddings = store.load_embeddings(MODEL2VEC_PROVIDER).unwrap_or_default();
+            let embeddings = match GitnovaStore::open(&args.repo) {
+                Ok(store) => store.load_embeddings(MODEL2VEC_PROVIDER).unwrap_or_default(),
+                Err(_) => gitnova_storage::json_export::import_embeddings(
+                    &args.repo.join(".gitnova/embeddings.json")).unwrap_or_default(),
+            };
 
             let model_path = args
                 .model

@@ -189,21 +189,14 @@ pub fn train(
                     .affine(1.0 / traj_log_probs.len() as f64, 0.0).unwrap()
                     .affine(train_config.reinforce_weight, 0.0).unwrap();
 
-                // ═══════ BPR auxiliary (on V_T from last trajectory) ═══════
-                let final_sel = last_selected.unwrap_or_else(|| subgraph.seed_indices.clone());
-                let final_features = gather_features(&full_features, &final_sel)?;
-                let (_, _, scores) = model.forward(&final_features, &query_tensor)?;
-
-                let final_positions: Vec<usize> = final_sel.iter().enumerate()
-                    .filter(|(_, &si)| pos_set.contains(&si))
-                    .map(|(i, _)| i).collect();
-
-                let bpr = bpr_loss(&scores, &final_positions, device)?;
-                let bpr = bpr.affine(train_config.bpr_weight, 0.0).unwrap();
+                // ═══════ BPR auxiliary (on FULL subgraph for cold-start signal) ═══════
+                let (_, _, scores) = model.forward(&full_features, &query_tensor)?;
+                let bpr_raw = bpr_loss(&scores, &positive_indices, device)?;
+                let bpr = bpr_raw.affine(train_config.bpr_weight, 0.0).unwrap();
                 let loss = rl_loss.add(&bpr).unwrap();
 
-                epoch_rl += rl_loss.to_vec0::<f64>().unwrap_or(0.0);
-                epoch_bpr += bpr.to_vec0::<f64>().unwrap_or(0.0);
+                epoch_rl += rl_loss.flatten_all().unwrap().to_vec1::<f64>().unwrap_or_default().first().copied().unwrap_or(0.0);
+                epoch_bpr += bpr_raw.flatten_all().unwrap().to_vec1::<f64>().unwrap_or_default().first().copied().unwrap_or(0.0);
 
                 batch_loss = match batch_loss {
                     Some(bl) => Some(bl.add(&loss).unwrap()),
@@ -310,18 +303,19 @@ fn bpr_loss(
 ) -> candle_core::Result<Tensor> {
     let n = scores.dims()[0];
     if positive_indices.is_empty() || n < 2 {
-        return Ok(Tensor::zeros((), DType::F32, device)?);
+        return Ok(Tensor::zeros((1,), DType::F32, device)?);
     }
     let mut rng = thread_rng();
-    let mut total = Tensor::zeros((), DType::F32, device)?;
-    let mut count = 0;
+    let mut total = Tensor::zeros((1,), DType::F32, device)?;
+    let mut count = 0usize;
     for &pos in positive_indices {
         let negs: Vec<usize> = (0..n).filter(|&i| !positive_indices.contains(&i) && i != pos).collect();
         if negs.is_empty() { continue; }
         let neg = *negs.choose(&mut rng).unwrap();
-        let diff = scores.get(pos)?.sub(&scores.get(neg)?)?;
-        let sig = candle_nn::ops::sigmoid(&diff)?;
-        total = total.add(&sig.log()?.neg()?)?;
+        let pos_score = scores.get(pos)?;
+        let neg_score = scores.get(neg)?;
+        let diff = pos_score.sub(&neg_score)?;
+        total = total.add(&candle_nn::ops::sigmoid(&diff)?.log()?.neg()?)?;
         count += 1;
     }
     if count > 0 { total = total.affine(1.0 / count as f64, 0.0)?; }
