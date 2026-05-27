@@ -109,8 +109,6 @@ pub fn train(
                 let mut traj_log_probs: Vec<Tensor> = Vec::with_capacity(num_traj);
                 let mut traj_rewards: Vec<f32> = Vec::with_capacity(num_traj);
 
-                let mut last_selected: Option<Vec<usize>> = None;
-
                 for _traj in 0..num_traj {
                     // selected/frontier: indices into bounded subgraph nodes
                     let mut selected: HashSet<usize> =
@@ -163,9 +161,6 @@ pub fn train(
                     let hits = selected.iter().filter(|&&i| pos_set.contains(&i)).count();
                     let reward = hits as f32 / pos_set.len().max(1) as f32;
 
-                    // Save last trajectory's selected set for BPR
-                    last_selected = Some(selected.iter().copied().collect());
-
                     if let Some(lp) = log_prob_sum {
                         traj_log_probs.push(lp);
                         traj_rewards.push(reward);
@@ -195,8 +190,8 @@ pub fn train(
                 let bpr = bpr_raw.affine(train_config.bpr_weight, 0.0).unwrap();
                 let loss = rl_loss.add(&bpr).unwrap();
 
-                epoch_rl += rl_loss.flatten_all().unwrap().to_vec1::<f64>().unwrap_or_default().first().copied().unwrap_or(0.0);
-                epoch_bpr += bpr_raw.flatten_all().unwrap().to_vec1::<f64>().unwrap_or_default().first().copied().unwrap_or(0.0);
+                epoch_rl += rl_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0) as f64;
+                epoch_bpr += bpr_raw.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0) as f64;
 
                 batch_loss = match batch_loss {
                     Some(bl) => Some(bl.add(&loss).unwrap()),
@@ -354,5 +349,38 @@ mod tests {
         let mut rng = thread_rng();
         let p = sample_categorical_without_replacement(&[0.1, 0.5, 0.4], 2, &mut rng);
         assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn test_bpr_loss_nonzero() {
+        let dev = &Device::Cpu;
+        let scores = Tensor::from_vec(vec![0.1f32, 0.2, 0.9, 0.3], (4, 1), dev).unwrap();
+        let pos = vec![2usize];
+        let loss = bpr_loss(&scores, &pos, dev).unwrap();
+        let val = loss.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        assert!(val > 0.0, "BPR loss should be > 0, got {val}");
+    }
+
+    #[test]
+    fn test_model_scores_are_not_uniform() {
+        use crate::model::{GraphTransformerModel, ModelConfig};
+        use candle_core::DType;
+        use candle_nn::{VarBuilder, VarMap};
+        let config = ModelConfig {
+            input_dim: 8, hidden_dim: 16, num_layers: 2,
+            num_heads: 2, ff_dim: 32, device: Device::Cpu,
+        };
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &config.device);
+        let model = GraphTransformerModel::new(&config, vb).unwrap();
+        let features = Tensor::randn(0f32, 1f32, (10, 8), &config.device).unwrap();
+        let query = Tensor::randn(0f32, 1f32, 8, &config.device).unwrap();
+        let (_, _, scores) = model.forward(&features, &query).unwrap();
+        let sv: Vec<f32> = scores.flatten_all().unwrap().to_vec1().unwrap();
+        let (min, max) = (sv.iter().cloned().fold(f32::INFINITY, f32::min),
+                          sv.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        let range = max - min;
+        eprintln!("model scores range: {:.6}", range);
+        assert!(range > 0.001, "Model scores should vary; all ~{:.6}", sv[0]);
     }
 }
