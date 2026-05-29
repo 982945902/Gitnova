@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 gitnova-core = { path = "../gitnova-core" }
+gitnova-atlas = { path = "../gitnova-atlas" }
 gitnova-dashboard = { path = "../gitnova-dashboard" }
 gitnova-enrich = { path = "../gitnova-enrich" }
 gitnova-mcp = { path = "../gitnova-mcp" }
@@ -28,4 +29,3 @@ serde_json.workspace = true
 [[bin]]
 name = "gitnova"
 path = "src/main.rs"
-

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
-use gitnova_enrich::embeddings::{self, LOCAL_HASH_PROVIDER, MODEL2VEC_PROVIDER};
+use gitnova_enrich::embeddings::{self, MODEL2VEC_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_fts};
@@ -10,6 +10,7 @@ use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 
@@ -40,6 +41,7 @@ enum Commands {
     DiffContext(DiffArgs),
     Embeddings(EmbeddingsArgs),
     Dashboard(DashboardArgs),
+    Atlas(AtlasArgs),
     Serve,
     #[command(name = "train")]
     Train(TrainArgs),
@@ -122,6 +124,24 @@ struct DashboardArgs {
     repo: PathBuf,
     #[arg(long, default_value_t = 4567)]
     port: u16,
+}
+
+#[derive(Args)]
+struct AtlasArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    entry: Option<String>,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long = "emit-json")]
+    emit_json: Option<PathBuf>,
+    #[arg(long, default_value_t = 6)]
+    max_flows: usize,
+    #[arg(long, default_value_t = 4)]
+    max_depth: usize,
+    #[arg(long, default_value_t = 80)]
+    max_nodes_per_flow: usize,
 }
 
 #[derive(Args)]
@@ -264,6 +284,30 @@ async fn main() -> Result<()> {
         },
         Commands::Dashboard(args) => {
             gitnova_dashboard::run_dashboard(args.repo, args.port).await?;
+        }
+        Commands::Atlas(args) => {
+            let graph = load_graph_with_fallback(&args.repo)?;
+            let report = gitnova_atlas::build_atlas(
+                &graph,
+                gitnova_atlas::AtlasOptions {
+                    entry: args.entry,
+                    max_flows: args.max_flows,
+                    max_depth: args.max_depth,
+                    max_nodes_per_flow: args.max_nodes_per_flow,
+                },
+            );
+            if let Some(path) = args.emit_json {
+                write_file(&path, serde_json::to_vec_pretty(&report)?)?;
+            }
+            let html = gitnova_atlas::render_html(&report)?;
+            write_file(&args.output, html.as_bytes())?;
+            print_json(&json!({
+                "status": "generated",
+                "output": args.output,
+                "flows": report.flows.len(),
+                "nodes": report.summary.nodes,
+                "edges": report.summary.edges
+            }))?;
         }
         Commands::Train(args) => {
             let graph = load_graph_with_fallback(&args.repo)?;
@@ -469,5 +513,13 @@ fn load_graph_with_fallback(repo: &Path) -> Result<gitnova_core::CodeGraph> {
 
 fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn write_file(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)?;
     Ok(())
 }

@@ -6,6 +6,8 @@ members = [
     "crates/gitnova-enrich",
     "crates/gitnova-mcp",
     "crates/gitnova-dashboard",
+    "crates/gitnova-atlas",
+    "crates/gitnova-wiki",
     "crates/gitnova-cli",
     "crates/gitnova-train"
 ]

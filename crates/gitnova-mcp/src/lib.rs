@@ -19,5 +19,7 @@ mod tests {
         let tools = server.tool_names();
         assert!(tools.contains(&"index_project".to_string()));
         assert!(tools.contains(&"watch_status".to_string()));
+        assert!(tools.contains(&"wiki_upsert_page".to_string()));
+        assert!(tools.contains(&"wiki_patch_private_note".to_string()));
     }
 }

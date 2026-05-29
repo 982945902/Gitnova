@@ -227,6 +227,52 @@ fn cli_exposes_core_workflows_and_embeddings() {
 }
 
 #[test]
+fn atlas_generates_single_file_html_report() {
+    let (temp, repo) = temp_fixture("ts_sample");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args(["index", repo.to_str().unwrap(), "--force"])
+        .assert()
+        .success();
+
+    let html_path = temp.path().join("atlas.html");
+    let json_path = temp.path().join("atlas.json");
+    Command::cargo_bin("gitnova")
+        .unwrap()
+        .args([
+            "atlas",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--entry",
+            "auth",
+            "--output",
+            html_path.to_str().unwrap(),
+            "--emit-json",
+            json_path.to_str().unwrap(),
+            "--max-flows",
+            "3",
+            "--max-depth",
+            "3",
+        ])
+        .assert()
+        .success();
+
+    let html = fs::read_to_string(&html_path).unwrap();
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("atlas-data"));
+    assert!(html.contains("Execution Flows"));
+
+    let json = fs::read_to_string(&json_path).unwrap();
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert!(report["flows"].as_array().unwrap().len() <= 3);
+    let rendered = serde_json::to_string(&report["flows"]).unwrap();
+    assert!(
+        rendered.contains("auth") || rendered.contains("validate") || rendered.contains("session"),
+        "atlas should preserve the requested auth-oriented flow, got {rendered}"
+    );
+}
+
+#[test]
 fn incremental_update_reports_skips_changes_and_deletes() {
     let (_temp, repo) = temp_fixture("rust_sample");
     Command::cargo_bin("gitnova")

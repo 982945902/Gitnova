@@ -11,6 +11,7 @@ gitnova-dashboard = { path = "../gitnova-dashboard" }
 gitnova-enrich = { path = "../gitnova-enrich" }
 gitnova-rank = { path = "../gitnova-rank" }
 gitnova-storage = { path = "../gitnova-storage" }
+gitnova-wiki = { path = "../gitnova-wiki" }
 notify.workspace = true
 rmcp = { version = "0.15.0", features = ["transport-io"] }
 schemars.workspace = true
