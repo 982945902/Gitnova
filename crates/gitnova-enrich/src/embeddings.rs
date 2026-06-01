@@ -22,12 +22,16 @@ fn model2vec_model() -> &'static Mutex<Option<model2vec_rs::model::StaticModel>>
     MODEL.get_or_init(|| Mutex::new(None))
 }
 
-fn get_model2vec() -> anyhow::Result<std::sync::MutexGuard<'static, Option<model2vec_rs::model::StaticModel>>> {
+fn get_model2vec(
+) -> anyhow::Result<std::sync::MutexGuard<'static, Option<model2vec_rs::model::StaticModel>>> {
     let mut guard = model2vec_model().lock().unwrap();
     if guard.is_none() {
         let model_id = std::env::var("GITNOVA_MODEL2VEC_MODEL")
             .unwrap_or_else(|_| "minishlab/potion-base-8M".to_string());
-        eprintln!("Loading model2vec model '{}' (first use, ~30MB download)...", model_id);
+        eprintln!(
+            "Loading model2vec model '{}' (first use, ~30MB download)...",
+            model_id
+        );
         let model = model2vec_rs::model::StaticModel::from_pretrained(&model_id, None, None, None)
             .map_err(|e| {
                 eprintln!("model2vec load failed: {}. Run 'gitnova embeddings build --provider local-hash' for offline use, or set GITNOVA_MODEL2VEC_MODEL to a local path.", e);
@@ -68,20 +72,28 @@ pub fn build_embeddings_with_command(
         MODEL2VEC_PROVIDER => {
             let guard = get_model2vec()?;
             let model = guard.as_ref().unwrap();
-            let ids: Vec<String> = graph.nodes.iter()
+            let ids: Vec<String> = graph
+                .nodes
+                .iter()
                 .filter(|n| !matches!(n.kind, NodeKind::Repository | NodeKind::Import))
                 .map(|n| n.id.clone())
                 .collect();
-            let texts: Vec<String> = graph.nodes.iter()
+            let texts: Vec<String> = graph
+                .nodes
+                .iter()
                 .filter(|n| !matches!(n.kind, NodeKind::Repository | NodeKind::Import))
                 .map(|n| format!("{} {} {} {:?}", n.qualified_name, n.path, n.text, n.kind))
                 .collect();
             let vectors = model.encode(&texts);
-            Ok(ids.iter().zip(vectors).map(|(id, vec)| StoredEmbedding {
-                node_id: id.clone(),
-                provider: MODEL2VEC_PROVIDER.into(),
-                vector: vec,
-            }).collect())
+            Ok(ids
+                .iter()
+                .zip(vectors)
+                .map(|(id, vec)| StoredEmbedding {
+                    node_id: id.clone(),
+                    provider: MODEL2VEC_PROVIDER.into(),
+                    vector: vec,
+                })
+                .collect())
         }
         other => anyhow::bail!("unsupported embedding provider: {other}"),
     }
@@ -116,7 +128,8 @@ pub fn similarity_map(
         Ok(map) => map,
         Err(e) => {
             eprintln!("model2vec unavailable ({}), falling back to local-hash", e);
-            similarity_map_for_provider(graph, vectors, query, LOCAL_HASH_PROVIDER).unwrap_or_default()
+            similarity_map_for_provider(graph, vectors, query, LOCAL_HASH_PROVIDER)
+                .unwrap_or_default()
         }
     }
 }

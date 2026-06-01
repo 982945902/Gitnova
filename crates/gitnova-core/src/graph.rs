@@ -184,16 +184,29 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
             for base in &symbol.base_classes {
                 if let Some(targets) = symbol_by_name.get(base) {
                     // Pick the best target: class > struct > qualified (has ::) > any
-                    let preferred = targets.iter().max_by_key(|t| {
-                        match graph.node(t).map(|n| &n.kind) {
-                            Some(NodeKind::Class) => 3,
-                            Some(NodeKind::Struct) => 2,
-                            _ if graph.node(t).map_or(false, |n| n.qualified_name.contains("::")) => 1,
-                            _ => 0,
-                        }
-                    });
+                    let preferred =
+                        targets
+                            .iter()
+                            .max_by_key(|t| match graph.node(t).map(|n| &n.kind) {
+                                Some(NodeKind::Class) => 3,
+                                Some(NodeKind::Struct) => 2,
+                                _ if graph
+                                    .node(t)
+                                    .map_or(false, |n| n.qualified_name.contains("::")) =>
+                                {
+                                    1
+                                }
+                                _ => 0,
+                            });
                     if let Some(target) = preferred {
-                        add_edge(&mut graph.edges, &mut edge_set, &node_id, target, EdgeKind::Extends, 9_000);
+                        add_edge(
+                            &mut graph.edges,
+                            &mut edge_set,
+                            &node_id,
+                            target,
+                            EdgeKind::Extends,
+                            9_000,
+                        );
                     }
                 }
             }
@@ -300,7 +313,9 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
         // Find pairs where one qname is a suffix of another
         for &i in indices {
             for &j in indices {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let qi = nodes[i].qualified_name.as_str();
                 let qj = nodes[j].qualified_name.as_str();
                 let (remove_idx, keep_idx) = if qi.ends_with(&format!("::{}", qj)) {
@@ -310,14 +325,17 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
                 } else {
                     let qi_parts: Vec<&str> = qi.split("::").collect();
                     let qj_parts: Vec<&str> = qj.split("::").collect();
-                    let (short_parts, long_parts, short_idx, long_idx) = if qi_parts.len() < qj_parts.len() {
-                        (&qi_parts, &qj_parts, i, j)
-                    } else {
-                        (&qj_parts, &qi_parts, j, i)
-                    };
+                    let (short_parts, long_parts, short_idx, long_idx) =
+                        if qi_parts.len() < qj_parts.len() {
+                            (&qi_parts, &qj_parts, i, j)
+                        } else {
+                            (&qj_parts, &qi_parts, j, i)
+                        };
                     if is_namespace_subsequence(short_parts, long_parts) {
                         (short_idx, long_idx)
-                    } else { continue; }
+                    } else {
+                        continue;
+                    }
                 };
                 let keep_id = nodes[keep_idx].id.clone();
                 if !id_map.contains_key(&nodes[remove_idx].id) {
@@ -351,9 +369,7 @@ fn deduplicate_nodes(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) {
 
     // Deduplicate edges that may now be identical
     let mut seen_edges: HashSet<(String, String, EdgeKind)> = HashSet::new();
-    edges.retain(|edge| {
-        seen_edges.insert((edge.from.clone(), edge.to.clone(), edge.kind.clone()))
-    });
+    edges.retain(|edge| seen_edges.insert((edge.from.clone(), edge.to.clone(), edge.kind.clone())));
 }
 
 fn is_namespace_subsequence(shorter: &[&str], longer: &[&str]) -> bool {

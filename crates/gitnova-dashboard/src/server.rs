@@ -82,7 +82,10 @@ async fn asset(AxumPath(path): AxumPath<String>) -> Response {
     }
     match path.as_str() {
         "app.js" => (
-            [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+            [(
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            )],
             include_str!("../assets/app.js").as_bytes().to_vec(),
         )
             .into_response(),
@@ -105,10 +108,9 @@ fn read_dist_bytes(path: &str) -> Option<Vec<u8>> {
 
 fn with_content_type(bytes: Vec<u8>, content_type: &'static str) -> Response {
     let mut response = bytes.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
 
@@ -230,9 +232,7 @@ fn load_dashboard_graph(state: &DashboardState) -> Result<gitnova_core::CodeGrap
     SurrealStore::open(state.repo_root.as_ref())
         .and_then(|store| store.load_graph())
         .or_else(|_| {
-            gitnova_storage::json_export::import_graph(
-                &state.repo_root.join(".gitnova/index.json"),
-            )
+            gitnova_storage::json_export::import_graph(&state.repo_root.join(".gitnova/index.json"))
         })
 }
 

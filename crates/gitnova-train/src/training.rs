@@ -31,10 +31,17 @@ pub struct TrainConfig {
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
-            epochs: 50, batch_size: 4, learning_rate: 0.005,
-            num_trajectories: 8, expand_steps: 3, frontier_select: 5,
-            reinforce_weight: 1.0, bpr_weight: 0.5,
-            seed_k: 10, subgraph_max_nodes: 100, subgraph_hops: 2,
+            epochs: 50,
+            batch_size: 4,
+            learning_rate: 0.005,
+            num_trajectories: 8,
+            expand_steps: 3,
+            frontier_select: 5,
+            reinforce_weight: 1.0,
+            bpr_weight: 0.5,
+            seed_k: 10,
+            subgraph_max_nodes: 100,
+            subgraph_hops: 2,
         }
     }
 }
@@ -51,14 +58,29 @@ pub fn train(
     let device = model.device();
 
     let node_lookup: HashMap<&str, usize> = graph
-        .nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
-
-    let all_embedding_ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
-    let all_embeddings: Vec<&[f32]> = graph.nodes.iter()
-        .map(|n| node_embeddings.get(&n.id).map(|v| v.as_slice()).unwrap_or(&[]))
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
         .collect();
 
-    let adam_params = ParamsAdamW { lr: train_config.learning_rate, weight_decay: 0.0, ..Default::default() };
+    let all_embedding_ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
+    let all_embeddings: Vec<&[f32]> = graph
+        .nodes
+        .iter()
+        .map(|n| {
+            node_embeddings
+                .get(&n.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+        })
+        .collect();
+
+    let adam_params = ParamsAdamW {
+        lr: train_config.learning_rate,
+        weight_decay: 0.0,
+        ..Default::default()
+    };
     let mut optimizer = AdamW::new(varmap.all_vars(), adam_params)?;
     let mut rng = thread_rng();
     let total_examples = examples.len();
@@ -77,29 +99,61 @@ pub fn train(
             for &idx in &indices[batch_start..batch_end] {
                 let example = &examples[idx];
 
-                let seed_ids = top_k_cosine(&example.query_embedding, &all_embedding_ids,
-                    &all_embeddings, train_config.seed_k, &node_lookup, graph);
-                if seed_ids.is_empty() { continue; }
+                let seed_ids = top_k_cosine(
+                    &example.query_embedding,
+                    &all_embedding_ids,
+                    &all_embeddings,
+                    train_config.seed_k,
+                    &node_lookup,
+                    graph,
+                );
+                if seed_ids.is_empty() {
+                    continue;
+                }
 
-                let subgraph = extract_subgraph(graph, &seed_ids,
-                    train_config.subgraph_max_nodes, train_config.subgraph_hops);
-                if subgraph.node_ids.len() < 5 { continue; }
+                let subgraph = extract_subgraph(
+                    graph,
+                    &seed_ids,
+                    train_config.subgraph_max_nodes,
+                    train_config.subgraph_hops,
+                );
+                if subgraph.node_ids.len() < 5 {
+                    continue;
+                }
 
                 // Pre-build full subgraph features [N_full, D]
                 let full_features = match build_feature_tensor(
-                    &subgraph.node_index, graph, node_embeddings, model_config.input_dim, device,
-                ) { Ok(f) => f, Err(_) => continue };
+                    &subgraph.node_index,
+                    graph,
+                    node_embeddings,
+                    model_config.input_dim,
+                    device,
+                ) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
 
                 let query_tensor = match Tensor::from_vec(
-                    example.query_embedding.clone(), example.query_embedding.len(), device,
-                ) { Ok(q) => q, Err(_) => continue };
+                    example.query_embedding.clone(),
+                    example.query_embedding.len(),
+                    device,
+                ) {
+                    Ok(q) => q,
+                    Err(_) => continue,
+                };
 
                 let positive_set: HashSet<&str> =
                     example.positive_ids.iter().map(|s| s.as_str()).collect();
-                let positive_indices: Vec<usize> = subgraph.node_ids.iter().enumerate()
+                let positive_indices: Vec<usize> = subgraph
+                    .node_ids
+                    .iter()
+                    .enumerate()
                     .filter(|(_, id)| positive_set.contains(id.as_str()))
-                    .map(|(i, _)| i).collect();
-                if positive_indices.is_empty() { continue; }
+                    .map(|(i, _)| i)
+                    .collect();
+                if positive_indices.is_empty() {
+                    continue;
+                }
                 let pos_set: HashSet<usize> = positive_indices.iter().copied().collect();
 
                 // ═══════ Sample M trajectories ═══════
@@ -117,23 +171,26 @@ pub fn train(
                     let mut log_prob_sum: Option<Tensor> = None;
 
                     for _step in 0..num_steps {
-                        if frontier.is_empty() { break; }
+                        if frontier.is_empty() {
+                            break;
+                        }
 
                         // ── Build induced subgraph G_t = G_q[V_t ∪ U_t] ──
                         let induced_indices = build_induced_indices(&selected, &frontier);
                         let induced_features = gather_features(&full_features, &induced_indices)?;
                         // Map frontier to positions within induced subgraph
-                        let frontier_local: Vec<usize> = frontier.iter()
+                        let frontier_local: Vec<usize> = frontier
+                            .iter()
                             .map(|&f| induced_indices.iter().position(|&i| i == f).unwrap())
                             .collect();
 
-                        let (_, policy_logits, _) = model.forward(
-                            &induced_features, &query_tensor,
-                        )?;
+                        let (_, policy_logits, _) =
+                            model.forward(&induced_features, &query_tensor)?;
 
                         let frontier_idx_tensor = Tensor::from_vec(
                             frontier_local.iter().map(|&i| i as i64).collect(),
-                            frontier_local.len(), device,
+                            frontier_local.len(),
+                            device,
                         )?;
                         let f_logits = policy_logits.index_select(&frontier_idx_tensor, 0)?;
                         let probs = match candle_nn::ops::softmax_last_dim(&f_logits) {
@@ -142,9 +199,11 @@ pub fn train(
                         };
 
                         let n_pick = select_per_step.min(frontier_local.len());
-                        let sampled_local = sample_categorical_without_replacement(&probs, n_pick, &mut rng);
+                        let sampled_local =
+                            sample_categorical_without_replacement(&probs, n_pick, &mut rng);
                         // Map back: local frontier index → subgraph node index
-                        let picked: Vec<usize> = sampled_local.iter().map(|&li| frontier[li]).collect();
+                        let picked: Vec<usize> =
+                            sampled_local.iter().map(|&li| frontier[li]).collect();
 
                         let lp: f32 = sampled_local.iter().map(|&li| probs[li].ln()).sum();
                         let lp_tensor = Tensor::new(&[lp], device).unwrap();
@@ -153,7 +212,9 @@ pub fn train(
                             None => Some(lp_tensor),
                         };
 
-                        for &idx in &picked { selected.insert(idx); }
+                        for &idx in &picked {
+                            selected.insert(idx);
+                        }
                         frontier = compute_frontier(&subgraph.adjacency, &selected);
                     }
 
@@ -167,7 +228,9 @@ pub fn train(
                     }
                 }
 
-                if traj_log_probs.is_empty() { continue; }
+                if traj_log_probs.is_empty() {
+                    continue;
+                }
 
                 // ═══════ REINFORCE ═══════
                 let baseline: f32 = traj_rewards.iter().sum::<f32>() / traj_rewards.len() as f32;
@@ -180,9 +243,12 @@ pub fn train(
                         None => Some(term),
                     };
                 }
-                let rl_loss = rl_loss.unwrap()
-                    .affine(1.0 / traj_log_probs.len() as f64, 0.0).unwrap()
-                    .affine(train_config.reinforce_weight, 0.0).unwrap();
+                let rl_loss = rl_loss
+                    .unwrap()
+                    .affine(1.0 / traj_log_probs.len() as f64, 0.0)
+                    .unwrap()
+                    .affine(train_config.reinforce_weight, 0.0)
+                    .unwrap();
 
                 // ═══════ BPR auxiliary (on FULL subgraph for cold-start signal) ═══════
                 let (_, _, scores) = model.forward(&full_features, &query_tensor)?;
@@ -190,8 +256,22 @@ pub fn train(
                 let bpr = bpr_raw.affine(train_config.bpr_weight, 0.0).unwrap();
                 let loss = rl_loss.add(&bpr).unwrap();
 
-                let rl_val = rl_loss.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0);
-                let bpr_val = bpr_raw.flatten_all().unwrap().to_vec1::<f32>().unwrap_or_default().first().copied().unwrap_or(0.0);
+                let rl_val = rl_loss
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap_or_default()
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0);
+                let bpr_val = bpr_raw
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap_or_default()
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0);
                 epoch_rl += rl_val as f64;
                 epoch_bpr += bpr_val as f64;
 
@@ -208,9 +288,13 @@ pub fn train(
         }
 
         if batches > 0 {
-            eprintln!("epoch {:3}/{:3}  rl={:.4}  bpr={:.4}",
-                epoch + 1, train_config.epochs,
-                epoch_rl / batches as f64, epoch_bpr / batches as f64);
+            eprintln!(
+                "epoch {:3}/{:3}  rl={:.4}  bpr={:.4}",
+                epoch + 1,
+                train_config.epochs,
+                epoch_rl / batches as f64,
+                epoch_bpr / batches as f64
+            );
         }
     }
 
@@ -232,17 +316,22 @@ fn build_induced_indices(selected: &HashSet<usize>, frontier: &[usize]) -> Vec<u
 fn gather_features(full_features: &Tensor, indices: &[usize]) -> candle_core::Result<Tensor> {
     let idx_tensor = Tensor::from_vec(
         indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
-        indices.len(), full_features.device(),
+        indices.len(),
+        full_features.device(),
     )?;
     full_features.index_select(&idx_tensor, 0)
 }
 
 fn sample_categorical_without_replacement(
-    probs: &[f32], k: usize, rng: &mut impl rand::Rng,
+    probs: &[f32],
+    k: usize,
+    rng: &mut impl rand::Rng,
 ) -> Vec<usize> {
     let n = probs.len();
     let k = k.min(n);
-    if k == 0 { return vec![]; }
+    if k == 0 {
+        return vec![];
+    }
     let total: f32 = probs.iter().sum();
     if total <= 0.0 {
         let mut indices: Vec<usize> = (0..n).collect();
@@ -254,12 +343,18 @@ fn sample_categorical_without_replacement(
     let mut picked = Vec::with_capacity(k);
     for _ in 0..k {
         let sum: f32 = remaining.iter().sum();
-        if sum <= 0.0 { break; }
+        if sum <= 0.0 {
+            break;
+        }
         let r: f32 = rng.gen::<f32>() * sum;
         let mut cum = 0.0;
         for (i, &p) in remaining.iter().enumerate() {
             cum += p;
-            if r < cum { picked.push(i); remaining[i] = 0.0; break; }
+            if r < cum {
+                picked.push(i);
+                remaining[i] = 0.0;
+                break;
+            }
         }
     }
     picked
@@ -267,36 +362,62 @@ fn sample_categorical_without_replacement(
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     let len = a.len().min(b.len());
-    if len == 0 { return 0.0; }
-    let (dot, na, nb) = a[..len].iter().zip(&b[..len])
-        .fold((0.0f64, 0.0f64, 0.0f64), |(d, na, nb), (&x, &y)| {
-            (d + x as f64 * y as f64, na + x as f64 * x as f64, nb + y as f64 * y as f64)
-        });
-    if na == 0.0 || nb == 0.0 { return 0.0; }
+    if len == 0 {
+        return 0.0;
+    }
+    let (dot, na, nb) =
+        a[..len]
+            .iter()
+            .zip(&b[..len])
+            .fold((0.0f64, 0.0f64, 0.0f64), |(d, na, nb), (&x, &y)| {
+                (
+                    d + x as f64 * y as f64,
+                    na + x as f64 * x as f64,
+                    nb + y as f64 * y as f64,
+                )
+            });
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
     dot / (na.sqrt() * nb.sqrt())
 }
 
 fn top_k_cosine(
-    query_emb: &[f32], all_ids: &[&str], all_embs: &[&[f32]],
-    k: usize, node_lookup: &HashMap<&str, usize>, graph: &CodeGraph,
+    query_emb: &[f32],
+    all_ids: &[&str],
+    all_embs: &[&[f32]],
+    k: usize,
+    node_lookup: &HashMap<&str, usize>,
+    graph: &CodeGraph,
 ) -> Vec<String> {
-    let mut scored: Vec<(f64, &str)> = all_ids.iter().enumerate()
+    let mut scored: Vec<(f64, &str)> = all_ids
+        .iter()
+        .enumerate()
         .filter_map(|(i, &id)| {
             let emb = all_embs[i];
-            if emb.is_empty() { return None; }
+            if emb.is_empty() {
+                return None;
+            }
             if let Some(&ni) = node_lookup.get(id) {
-                if matches!(graph.nodes[ni].kind,
-                    NodeKind::Repository | NodeKind::File | NodeKind::Import) { return None; }
+                if matches!(
+                    graph.nodes[ni].kind,
+                    NodeKind::Repository | NodeKind::File | NodeKind::Import
+                ) {
+                    return None;
+                }
             }
             Some((cosine_similarity(query_emb, emb), id))
-        }).collect();
+        })
+        .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     scored.into_iter().map(|(_, id)| id.to_string()).collect()
 }
 
 fn bpr_loss(
-    scores: &Tensor, positive_indices: &[usize], device: &Device,
+    scores: &Tensor,
+    positive_indices: &[usize],
+    device: &Device,
 ) -> candle_core::Result<Tensor> {
     let n = scores.dims()[0];
     if positive_indices.is_empty() || n < 2 {
@@ -306,8 +427,12 @@ fn bpr_loss(
     let mut total = Tensor::zeros((1,), DType::F32, device)?;
     let mut count = 0usize;
     for &pos in positive_indices {
-        let negs: Vec<usize> = (0..n).filter(|&i| !positive_indices.contains(&i) && i != pos).collect();
-        if negs.is_empty() { continue; }
+        let negs: Vec<usize> = (0..n)
+            .filter(|&i| !positive_indices.contains(&i) && i != pos)
+            .collect();
+        if negs.is_empty() {
+            continue;
+        }
         let neg = *negs.choose(&mut rng).unwrap();
         let pos_score = scores.get(pos)?;
         let neg_score = scores.get(neg)?;
@@ -315,23 +440,36 @@ fn bpr_loss(
         total = total.add(&candle_nn::ops::sigmoid(&diff)?.log()?.neg()?)?;
         count += 1;
     }
-    if count > 0 { total = total.affine(1.0 / count as f64, 0.0)?; }
+    if count > 0 {
+        total = total.affine(1.0 / count as f64, 0.0)?;
+    }
     Ok(total)
 }
 
 fn build_feature_tensor(
-    node_indices: &[usize], graph: &CodeGraph,
-    node_embeddings: &HashMap<String, Vec<f32>>, dim: usize, device: &Device,
+    node_indices: &[usize],
+    graph: &CodeGraph,
+    node_embeddings: &HashMap<String, Vec<f32>>,
+    dim: usize,
+    device: &Device,
 ) -> candle_core::Result<Tensor> {
     let mut data = Vec::with_capacity(node_indices.len() * dim);
     for &gi in node_indices {
         let nid = &graph.nodes[gi].id;
         match node_embeddings.get(nid) {
             Some(emb) => {
-                for &v in emb.iter().take(dim) { data.push(v); }
-                for _ in emb.len()..dim { data.push(0.0); }
+                for &v in emb.iter().take(dim) {
+                    data.push(v);
+                }
+                for _ in emb.len()..dim {
+                    data.push(0.0);
+                }
             }
-            None => { for _ in 0..dim { data.push(0.0); } }
+            None => {
+                for _ in 0..dim {
+                    data.push(0.0);
+                }
+            }
         }
     }
     Tensor::from_vec(data, (node_indices.len(), dim), device)
@@ -343,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_cosine() {
-        assert!((cosine_similarity(&[1.0,0.0,0.0], &[1.0,0.0,0.0]) - 1.0).abs() < 0.001);
+        assert!((cosine_similarity(&[1.0, 0.0, 0.0], &[1.0, 0.0, 0.0]) - 1.0).abs() < 0.001);
     }
 
     #[test]
@@ -369,8 +507,12 @@ mod tests {
         use candle_core::DType;
         use candle_nn::{VarBuilder, VarMap};
         let config = ModelConfig {
-            input_dim: 8, hidden_dim: 16, num_layers: 2,
-            num_heads: 2, ff_dim: 32, device: Device::Cpu,
+            input_dim: 8,
+            hidden_dim: 16,
+            num_layers: 2,
+            num_heads: 2,
+            ff_dim: 32,
+            device: Device::Cpu,
         };
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &config.device);
@@ -379,8 +521,10 @@ mod tests {
         let query = Tensor::randn(0f32, 1f32, 8, &config.device).unwrap();
         let (_, _, scores) = model.forward(&features, &query).unwrap();
         let sv: Vec<f32> = scores.flatten_all().unwrap().to_vec1().unwrap();
-        let (min, max) = (sv.iter().cloned().fold(f32::INFINITY, f32::min),
-                          sv.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        let (min, max) = (
+            sv.iter().cloned().fold(f32::INFINITY, f32::min),
+            sv.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
         let range = max - min;
         eprintln!("model scores range: {:.6}", range);
         assert!(range > 0.001, "Model scores should vary; all ~{:.6}", sv[0]);

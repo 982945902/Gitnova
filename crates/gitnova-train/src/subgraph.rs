@@ -49,7 +49,10 @@ pub fn extract_subgraph(
     // Build outgoing adjacency: src_idx → Vec<(dst_idx, edge_kind)>
     let mut outgoing: Vec<Vec<(usize, &EdgeKind)>> = vec![Vec::new(); graph.nodes.len()];
     for edge in &graph.edges {
-        if let (Some(&from), Some(&to)) = (node_lookup.get(edge.from.as_str()), node_lookup.get(edge.to.as_str())) {
+        if let (Some(&from), Some(&to)) = (
+            node_lookup.get(edge.from.as_str()),
+            node_lookup.get(edge.to.as_str()),
+        ) {
             outgoing[from].push((to, &edge.kind));
             // Also add reverse for undirected traversal
             outgoing[to].push((from, &edge.kind));
@@ -185,7 +188,12 @@ mod tests {
     }
 
     fn make_edge(from: &str, to: &str, kind: EdgeKind) -> Edge {
-        Edge { from: from.to_string(), to: to.to_string(), kind, confidence_basis_points: 10000 }
+        Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            kind,
+            confidence_basis_points: 10000,
+        }
     }
 
     #[test]
@@ -218,9 +226,17 @@ mod tests {
         let mut nodes = vec![];
         let mut edges = vec![];
         for i in 0..50 {
-            nodes.push(make_node(&format!("n{i}"), &format!("node_{i}"), NodeKind::Function));
+            nodes.push(make_node(
+                &format!("n{i}"),
+                &format!("node_{i}"),
+                NodeKind::Function,
+            ));
             if i > 0 {
-                edges.push(make_edge(&format!("n{i}"), &format!("n{}", i - 1), EdgeKind::Calls));
+                edges.push(make_edge(
+                    &format!("n{i}"),
+                    &format!("n{}", i - 1),
+                    EdgeKind::Calls,
+                ));
             }
         }
         let graph = CodeGraph {

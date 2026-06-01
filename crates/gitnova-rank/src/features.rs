@@ -132,13 +132,31 @@ pub fn utility_penalty(node: &Node, overlap: f64) -> f64 {
     .any(|needle| haystack.contains(needle));
 
     let generic_method_names = [
-        "size", "c_str", "begin", "end", "empty", "Init",
-        "clear", "get", "Get", "set", "push_back", "pop_back",
-        "length", "data", "reset", "find", "insert",
-        "toString", "to_string", "init", "destroy", "IsOK",
+        "size",
+        "c_str",
+        "begin",
+        "end",
+        "empty",
+        "Init",
+        "clear",
+        "get",
+        "Get",
+        "set",
+        "push_back",
+        "pop_back",
+        "length",
+        "data",
+        "reset",
+        "find",
+        "insert",
+        "toString",
+        "to_string",
+        "init",
+        "destroy",
+        "IsOK",
     ];
-    let is_generic_method = generic_method_names.contains(&node.name.as_str())
-        && node.metrics.in_degree > 20;
+    let is_generic_method =
+        generic_method_names.contains(&node.name.as_str()) && node.metrics.in_degree > 20;
 
     // Third-party library penalty: if the path contains third_party/ or thirdparty/,
     // and query overlap is low, penalize heavily.

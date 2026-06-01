@@ -8,8 +8,8 @@ use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, T
 use serde::Serialize;
 
 use crate::types::{
-    ContentFormat, DeepTask, Evidence, PageKind, PatchMode, TaskStatus, WikiNode, WikiOutline,
-    WikiPage, WikiSchema,
+    ContentFormat, DeepTask, Evidence, OutlinePage, PageKind, PatchMode, TaskStatus, WikiNode,
+    WikiOutline, WikiPage, WikiSchema,
 };
 
 pub struct WikiStore {
@@ -118,7 +118,11 @@ impl WikiStore {
         task.status = status;
         task.confidence = confidence;
         task.error = error;
+        let private_note = refreshed_private_note_for_page(&self.root, page)?;
         self.write_outline(&outline)?;
+        if !private_note.is_empty() {
+            self.patch_private_note(page_id, &private_note, PatchMode::Replace)?;
+        }
         self.append_journal("update_task_status", page_id)
     }
 
@@ -215,6 +219,28 @@ impl WikiStore {
         self.write_schema(&schema)?;
         self.append_journal("append_evidence", &id)?;
         self.render_all(&schema)
+    }
+
+    pub fn publish_source_file(
+        &self,
+        repo_path: impl AsRef<Path>,
+        source_file: &str,
+    ) -> Result<bool> {
+        let Some(source_ref) = source_page_ref(source_file) else {
+            return Ok(false);
+        };
+        let source_path = repo_path.as_ref().join(source_file);
+        if !source_path.is_file() {
+            return Ok(false);
+        }
+        let content = fs::read_to_string(&source_path)
+            .with_context(|| format!("read source file: {source_file}"))?;
+        let output_path = self.root.join(source_ref);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output_path, render_source_page(source_file, &content))?;
+        Ok(true)
     }
 
     pub fn patch_private_note(&self, id: &str, content: &str, mode: PatchMode) -> Result<()> {
@@ -364,6 +390,18 @@ fn outline_private_note(purpose: Option<&str>, tasks: &[DeepTask]) -> String {
     note.trim_end().to_string()
 }
 
+fn refreshed_private_note_for_page(root: &Path, page: &OutlinePage) -> Result<String> {
+    let mut note = outline_private_note(page.purpose.as_deref(), &page.deep_tasks);
+    let existing = fs::read_to_string(root.join(private_note_ref(&page.id))).unwrap_or_default();
+    if let Some(index) = existing.find("Atlas Follow-ups\n") {
+        if !note.is_empty() {
+            note.push_str("\n\n");
+        }
+        note.push_str(existing[index..].trim_end());
+    }
+    Ok(note)
+}
+
 fn is_page_under_root(page_id: &str, root_page_id: &str) -> bool {
     page_id == root_page_id || page_id.starts_with(&format!("{root_page_id}/"))
 }
@@ -454,7 +492,12 @@ p { margin: 8px 0; }
 ul, ol { padding-left: 24px; margin: 10px 0 14px; }
 li { margin: 6px 0; }
 code { background: #edf2f0; border: 1px solid #dce6e2; border-radius: 5px; padding: 1px 5px; font-size: .92em; }
-pre code { display: block; padding: 12px; overflow-x: auto; }
+pre { margin: 14px 0; border: 1px solid var(--line); border-radius: 8px; background: #f6f8fa; overflow: hidden; }
+pre code { display: block; padding: 12px 14px; overflow-x: auto; background: transparent; border: 0; border-radius: 0; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0 18px; font-size: .95rem; }
+th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #f1f5f4; font-weight: 800; }
+tr:nth-child(even) td { background: #fbfcfc; }
 strong { font-weight: 800; }
 .summary { max-width: 780px; color: var(--muted); font-size: 16px; }
 .child-pages ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; padding: 0; margin: 0; list-style: none; align-items: stretch; }
@@ -465,11 +508,21 @@ strong { font-weight: 800; }
 .page-card:hover, .page-card:focus-visible { background: #fbfdfc; box-shadow: 0 3px 14px rgba(23, 32, 51, .08); text-decoration: none; }
 a { color: var(--accent); font-weight: 700; text-decoration: none; }
 a:hover { text-decoration: none; }
+.source-cite { display: inline-flex; align-items: center; justify-content: center; min-width: 1.45em; min-height: 1.45em; margin-left: 3px; border: 1px solid #a7d5ce; border-radius: 999px; background: #e7f3f1; color: var(--accent); font-size: .78em; font-weight: 800; vertical-align: super; }
+.source-cite:hover, .source-cite:focus-visible { background: #d4ece8; text-decoration: none; }
 article { margin-top: 26px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; }
 article h2:first-child { margin-top: 0; }
 .diagram-block { margin: 18px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #fcfefd; padding: 14px; }
 .diagram-block svg { display: block; max-width: 100%; height: auto; }
 .diagram-block pre { margin: 0; white-space: pre; font-size: 0.92rem; line-height: 1.55; }
+.source-spans { margin-top: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+.source-spans h2 { margin: 0 0 12px; }
+.source-spans ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.source-spans li { margin: 0; }
+.source-span { display: grid; gap: 5px; border: 1px solid #e3e8ef; border-radius: 8px; padding: 10px 12px; background: #fbfcfc; }
+.source-span code { width: fit-content; max-width: 100%; overflow-wrap: anywhere; }
+.source-span a { width: fit-content; max-width: 100%; }
+.source-note { margin: 0; color: var(--muted); font-size: 0.94rem; }
 @media (max-width: 640px) { .app-shell { display: block; } .wiki-sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); } }
 </style>"#,
     );
@@ -514,11 +567,22 @@ article h2:first-child { margin-top: 0; }
         html.push_str("</ul></nav>");
     }
     html.push_str("<article>");
+    let has_inline_sources = matches!(node.content_format, ContentFormat::Markdown)
+        && content_has_source_markers(content);
     match node.content_format {
-        ContentFormat::Markdown => html.push_str(&render_markdown(content)),
+        ContentFormat::Markdown => {
+            html.push_str(&render_markdown_with_sources(
+                content,
+                &node.page_ref,
+                &node.evidence,
+            ));
+        }
         ContentFormat::Html => html.push_str(content),
     }
     html.push_str("</article>");
+    if !has_inline_sources {
+        html.push_str(&render_source_spans(&node.page_ref, &node.evidence));
+    }
     if !node.evidence.is_empty() {
         html.push_str(&format!(
             "<script type=\"application/json\" data-gitnova-evidence>{}</script>",
@@ -536,6 +600,120 @@ if (window.mermaid) {
         );
     }
     html.push_str("</body></html>");
+    html
+}
+
+fn render_source_spans(from_page_ref: &str, evidence: &[Evidence]) -> String {
+    if evidence.is_empty() {
+        return String::new();
+    }
+
+    let mut html = String::from(
+        "<aside class=\"source-spans\" aria-label=\"Source spans\"><h2>Source Spans</h2><ul>",
+    );
+    for item in evidence {
+        html.push_str("<li><div class=\"source-span\">");
+        let label = source_span_label(item);
+        if let Some(href) = source_span_href(from_page_ref, item) {
+            html.push_str("<a href=\"");
+            html.push_str(&escape_html(&href));
+            html.push_str("\"><code>");
+            html.push_str(&escape_html(&label));
+            html.push_str("</code></a>");
+        } else {
+            html.push_str("<code>");
+            html.push_str(&escape_html(&label));
+            html.push_str("</code>");
+        }
+        if let Some(note) = &item.note {
+            if !note.trim().is_empty() {
+                html.push_str("<p class=\"source-note\">");
+                html.push_str(&escape_html(note.trim()));
+                html.push_str("</p>");
+            }
+        }
+        html.push_str("</div></li>");
+    }
+    html.push_str("</ul></aside>");
+    html
+}
+
+fn source_span_href(from_page_ref: &str, evidence: &Evidence) -> Option<String> {
+    let mut href = relative_href(from_page_ref, &source_page_ref(&evidence.file)?);
+    if let Some(start_line) = evidence.start_line {
+        href.push_str("#L");
+        href.push_str(&start_line.to_string());
+    }
+    Some(href)
+}
+
+fn source_span_label(evidence: &Evidence) -> String {
+    match (evidence.start_line, evidence.end_line) {
+        (Some(start), Some(end)) if start == end => format!("{}:{start}", evidence.file),
+        (Some(start), Some(end)) => format!("{}:{start}-{end}", evidence.file),
+        (Some(start), None) => format!("{}:{start}", evidence.file),
+        (None, Some(end)) => format!("{}:1-{end}", evidence.file),
+        (None, None) => evidence.file.clone(),
+    }
+}
+
+fn source_page_ref(source_file: &str) -> Option<String> {
+    let path = Path::new(source_file);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            return None;
+        };
+        let part = part.to_str()?;
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("pages/_sources/{}.html", parts.join("/")))
+}
+
+fn render_source_page(source_file: &str, content: &str) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    html.push_str(&format!("<title>{}</title>", escape_html(source_file)));
+    html.push_str(
+        r#"<style>
+:root { color-scheme: light; --bg: #f7f8fb; --ink: #172033; --muted: #667085; --line: #d7dce5; --panel: #ffffff; --accent: #0f766e; --target: #fff4c2; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+main { max-width: 1180px; margin: 0 auto; padding: 28px 18px 64px; }
+.source-header { margin-bottom: 16px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+.source-header a { color: var(--accent); font: 700 13px/1.4 ui-sans-serif, system-ui, sans-serif; text-decoration: none; }
+h1 { margin: 8px 0 0; font-size: 20px; line-height: 1.25; overflow-wrap: anywhere; }
+pre { margin: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: auto; }
+code { display: table; width: 100%; border-collapse: collapse; }
+.source-line { display: table-row; }
+.line-no, .line-code { display: table-cell; white-space: pre; }
+.line-no { width: 1%; padding: 0 12px; color: var(--muted); text-align: right; border-right: 1px solid #edf0f4; user-select: none; }
+.line-code { padding: 0 14px; }
+.source-line:target .line-no, .source-line:target .line-code { background: var(--target); }
+</style>"#,
+    );
+    html.push_str("</head><body><main>");
+    html.push_str("<header class=\"source-header\"><a href=\"javascript:history.back()\">Back</a>");
+    html.push_str(&format!("<h1>{}</h1></header>", escape_html(source_file)));
+    html.push_str("<pre><code>");
+    for (index, line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        html.push_str(&format!(
+            "<span class=\"source-line\" id=\"L{line_number}\"><span class=\"line-no\">{line_number}</span><span class=\"line-code\">{}</span></span>\n",
+            escape_html(line)
+        ));
+    }
+    html.push_str("</code></pre></main></body></html>");
     html
 }
 
@@ -698,6 +876,77 @@ fn render_markdown(content: &str) -> String {
 
     html::push_html(&mut html, events.into_iter());
     html
+}
+
+fn render_markdown_with_sources(
+    content: &str,
+    from_page_ref: &str,
+    evidence: &[Evidence],
+) -> String {
+    render_markdown(&expand_source_markers(content, from_page_ref, evidence))
+}
+
+fn content_has_source_markers(content: &str) -> bool {
+    content.contains("{{source:") || content.contains("{{src:")
+}
+
+fn expand_source_markers(content: &str, from_page_ref: &str, evidence: &[Evidence]) -> String {
+    let mut output = String::new();
+    let mut remaining = content;
+    while let Some(start) = remaining.find("{{") {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            output.push_str(&remaining[start..]);
+            return output;
+        };
+        let marker = &after_start[..end];
+        if let Some(source_html) = render_source_marker(marker, from_page_ref, evidence) {
+            output.push_str(&source_html);
+        } else {
+            output.push_str("{{");
+            output.push_str(marker);
+            output.push_str("}}");
+        }
+        remaining = &after_start[end + 2..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn render_source_marker(
+    marker: &str,
+    from_page_ref: &str,
+    evidence: &[Evidence],
+) -> Option<String> {
+    let index = marker
+        .strip_prefix("source:")
+        .or_else(|| marker.strip_prefix("src:"))?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+    let evidence_item = evidence.get(index.checked_sub(1)?)?;
+    let href = source_span_href(from_page_ref, evidence_item)?;
+    let label = format!("[{index}]");
+    let title = source_marker_title(evidence_item);
+    Some(format!(
+        "<a class=\"source-cite\" href=\"{}\" title=\"{}\" aria-label=\"{}\">{}</a>",
+        escape_html(&href),
+        escape_html(&title),
+        escape_html(&title),
+        label
+    ))
+}
+
+fn source_marker_title(evidence: &Evidence) -> String {
+    let mut title = source_span_label(evidence);
+    if let Some(note) = &evidence.note {
+        if !note.trim().is_empty() {
+            title.push_str(" - ");
+            title.push_str(note.trim());
+        }
+    }
+    title
 }
 
 fn render_diagram_block(format: &str, diagram: &str) -> String {

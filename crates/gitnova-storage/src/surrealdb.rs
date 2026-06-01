@@ -25,14 +25,20 @@ impl SurrealStore {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(anyhow::anyhow!("SurrealDB: nested runtime not supported"));
         }
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let db = rt.block_on(async { connect(&db_dir).await })?;
         std::mem::forget(rt);
         Ok(Self { db, repo_root })
     }
 
-    pub fn repo_root(&self) -> &Path { &self.repo_root }
-    pub fn json_path(&self) -> PathBuf { self.repo_root.join(".gitnova/index.json") }
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+    pub fn json_path(&self) -> PathBuf {
+        self.repo_root.join(".gitnova/index.json")
+    }
 
     // ── Graph persistence ──
 
@@ -42,7 +48,9 @@ impl SurrealStore {
 
         // Write full graph as single JSON blob to SurrealDB (fast, atomic)
         let graph_json = serde_json::to_string(graph)?;
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         rt.block_on(async {
             let _ = self.db.query("DELETE FROM g_meta WHERE id = 'codegraph'").await;
             let escaped = graph_json.replace('\\', "\\\\").replace('\'', "\\'");
@@ -76,9 +84,15 @@ impl SurrealStore {
     }
 
     pub fn load_graph(&self) -> Result<CodeGraph> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let graph: Option<CodeGraph> = rt.block_on(async {
-            if let Ok(mut result) = self.db.query("SELECT value FROM g_meta WHERE id = 'codegraph'").await {
+            if let Ok(mut result) = self
+                .db
+                .query("SELECT value FROM g_meta WHERE id = 'codegraph'")
+                .await
+            {
                 if let Ok(rows) = result.take::<Vec<serde_json::Value>>(0) {
                     if let Some(v) = rows.first().and_then(|r| r["value"].as_str()) {
                         return serde_json::from_str(v).ok();
@@ -106,7 +120,9 @@ impl SurrealStore {
     // ── FTS search ──
 
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<String>> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let ids: Vec<String> = rt.block_on(async {
             let q = query.replace('\'', "\\'");
             let sql = format!(
@@ -134,12 +150,20 @@ impl SurrealStore {
     pub fn save_manifest(&self, entries: &[FileManifestEntry]) -> Result<()> {
         let entries_json = serde_json::to_string(entries)?;
         let escaped = entries_json.replace('\\', "\\\\").replace('\'', "\\'");
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         rt.block_on(async {
-            let _ = self.db.query("DELETE FROM g_meta WHERE id = 'file_manifest'").await;
-            self.db.query(format!(
-                "CREATE g_meta CONTENT {{ id: 'file_manifest', value: '{}' }}", escaped
-            )).await?;
+            let _ = self
+                .db
+                .query("DELETE FROM g_meta WHERE id = 'file_manifest'")
+                .await;
+            self.db
+                .query(format!(
+                    "CREATE g_meta CONTENT {{ id: 'file_manifest', value: '{}' }}",
+                    escaped
+                ))
+                .await?;
             Ok::<_, anyhow::Error>(())
         })?;
         std::mem::forget(rt);
@@ -147,9 +171,15 @@ impl SurrealStore {
     }
 
     pub fn load_manifest(&self) -> Result<HashMap<String, FileManifestEntry>> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let map = rt.block_on(async {
-            if let Ok(mut result) = self.db.query("SELECT value FROM g_meta WHERE id = 'file_manifest'").await {
+            if let Ok(mut result) = self
+                .db
+                .query("SELECT value FROM g_meta WHERE id = 'file_manifest'")
+                .await
+            {
                 if let Ok(rows) = result.take::<Vec<serde_json::Value>>(0) {
                     if let Some(v) = rows.first().and_then(|r| r["value"].as_str()) {
                         if let Ok(entries) = serde_json::from_str::<Vec<FileManifestEntry>>(v) {
@@ -169,12 +199,20 @@ impl SurrealStore {
     pub fn save_embeddings(&self, embeddings: &[StoredEmbedding]) -> Result<()> {
         let emb_json = serde_json::to_string(embeddings)?;
         let escaped = emb_json.replace('\\', "\\\\").replace('\'', "\\'");
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         rt.block_on(async {
-            let _ = self.db.query("DELETE FROM g_meta WHERE id = 'embeddings'").await;
-            self.db.query(format!(
-                "CREATE g_meta CONTENT {{ id: 'embeddings', value: '{}' }}", escaped
-            )).await?;
+            let _ = self
+                .db
+                .query("DELETE FROM g_meta WHERE id = 'embeddings'")
+                .await;
+            self.db
+                .query(format!(
+                    "CREATE g_meta CONTENT {{ id: 'embeddings', value: '{}' }}",
+                    escaped
+                ))
+                .await?;
             Ok::<_, anyhow::Error>(())
         })?;
         std::mem::forget(rt);
@@ -182,13 +220,20 @@ impl SurrealStore {
     }
 
     pub fn load_embeddings(&self, provider: &str) -> Result<HashMap<String, Vec<f32>>> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let map = rt.block_on(async {
-            if let Ok(mut result) = self.db.query("SELECT value FROM g_meta WHERE id = 'embeddings'").await {
+            if let Ok(mut result) = self
+                .db
+                .query("SELECT value FROM g_meta WHERE id = 'embeddings'")
+                .await
+            {
                 if let Ok(rows) = result.take::<Vec<serde_json::Value>>(0) {
                     if let Some(v) = rows.first().and_then(|r| r["value"].as_str()) {
                         if let Ok(all) = serde_json::from_str::<Vec<StoredEmbedding>>(v) {
-                            return all.into_iter()
+                            return all
+                                .into_iter()
                                 .filter(|e| e.provider == provider)
                                 .map(|e| (e.node_id.clone(), e.vector.clone()))
                                 .collect();
@@ -211,9 +256,12 @@ async fn connect(db_dir: &Path) -> Result<Db> {
 }
 
 async fn ensure_schema(db: &Db) -> Result<()> {
-    db.query("DEFINE ANALYZER IF NOT EXISTS simple TOKENIZERS blank, class FILTERS lowercase;").await?;
-    db.query("DEFINE TABLE IF NOT EXISTS symbol SCHEMALESS;").await?;
+    db.query("DEFINE ANALYZER IF NOT EXISTS simple TOKENIZERS blank, class FILTERS lowercase;")
+        .await?;
+    db.query("DEFINE TABLE IF NOT EXISTS symbol SCHEMALESS;")
+        .await?;
     db.query("DEFINE INDEX IF NOT EXISTS idx_fts ON symbol FIELDS text SEARCH ANALYZER simple BM25 HIGHLIGHTS;").await?;
-    db.query("DEFINE TABLE IF NOT EXISTS g_meta SCHEMALESS;").await?;
+    db.query("DEFINE TABLE IF NOT EXISTS g_meta SCHEMALESS;")
+        .await?;
     Ok(())
 }

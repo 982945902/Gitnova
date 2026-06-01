@@ -269,12 +269,18 @@ async fn main() -> Result<()> {
                 let embeddings_vec = embeddings::build_embeddings(&graph, &build.provider)?;
                 let count = embeddings_vec.len();
                 // Export to JSON file as reliable backup
-                let emb_map: HashMap<String, Vec<f32>> = embeddings_vec.iter()
-                    .map(|e| (e.node_id.clone(), e.vector.clone())).collect();
+                let emb_map: HashMap<String, Vec<f32>> = embeddings_vec
+                    .iter()
+                    .map(|e| (e.node_id.clone(), e.vector.clone()))
+                    .collect();
                 let _ = gitnova_storage::json_export::export_embeddings(
-                    &emb_map, &build.repo.join(".gitnova/embeddings.json"));
+                    &emb_map,
+                    &build.repo.join(".gitnova/embeddings.json"),
+                );
                 // Try SurrealDB (best-effort, may fail in nested runtime)
-                if let Ok(store) = GitnovaStore::open(&build.repo) { let _ = store.save_embeddings(&embeddings_vec); }
+                if let Ok(store) = GitnovaStore::open(&build.repo) {
+                    let _ = store.save_embeddings(&embeddings_vec);
+                }
                 print_json(&json!({
                     "status": "built",
                     "provider": build.provider,
@@ -316,7 +322,9 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     // Fallback: load embeddings from JSON file
                     gitnova_storage::json_export::import_embeddings(
-                        &args.repo.join(".gitnova/embeddings.json")).unwrap_or_default()
+                        &args.repo.join(".gitnova/embeddings.json"),
+                    )
+                    .unwrap_or_default()
                 }
             };
 
@@ -326,7 +334,10 @@ async fn main() -> Result<()> {
             }
 
             let examples = gitnova_train::data::generate_training_examples(
-                &graph, &embeddings, &args.provider, 2000,
+                &graph,
+                &embeddings,
+                &args.provider,
+                2000,
             )?;
 
             if examples.is_empty() {
@@ -352,8 +363,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| args.repo.join(".gitnova/model/model.safetensors"));
 
             gitnova_train::train_and_save(
-                &examples, &graph, &embeddings,
-                &model_config, &train_config, &save_path,
+                &examples,
+                &graph,
+                &embeddings,
+                &model_config,
+                &train_config,
+                &save_path,
             )?;
 
             eprintln!("Model saved to {}", save_path.display());
@@ -361,9 +376,13 @@ async fn main() -> Result<()> {
         Commands::RetrieveGraph(args) => {
             let graph = load_graph_with_fallback(&args.repo)?;
             let embeddings = match GitnovaStore::open(&args.repo) {
-                Ok(store) => store.load_embeddings(MODEL2VEC_PROVIDER).unwrap_or_default(),
+                Ok(store) => store
+                    .load_embeddings(MODEL2VEC_PROVIDER)
+                    .unwrap_or_default(),
                 Err(_) => gitnova_storage::json_export::import_embeddings(
-                    &args.repo.join(".gitnova/embeddings.json")).unwrap_or_default(),
+                    &args.repo.join(".gitnova/embeddings.json"),
+                )
+                .unwrap_or_default(),
             };
 
             let model_path = args
@@ -376,9 +395,8 @@ async fn main() -> Result<()> {
                     model_path.display()
                 );
                 eprintln!("Falling back to dense embedding retrieval.");
-                let results = embeddings::search_embeddings(
-                    &graph, &embeddings, &args.query, args.limit,
-                );
+                let results =
+                    embeddings::search_embeddings(&graph, &embeddings, &args.query, args.limit);
                 print_json(&results)?;
                 return Ok(());
             }
@@ -390,7 +408,9 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
             let retriever = gitnova_train::SeedERRetriever::load(
-                &model_path, &model_config, Default::default(),
+                &model_path,
+                &model_config,
+                Default::default(),
             )?;
 
             let query_vec = embeddings::embed_text(&args.query);
@@ -429,7 +449,10 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
 fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let files = scan_repository(repo)?;
     let store = GitnovaStore::open(repo);
-    let old = store.as_ref().map(|s| s.load_manifest().unwrap_or_default()).unwrap_or_default();
+    let old = store
+        .as_ref()
+        .map(|s| s.load_manifest().unwrap_or_default())
+        .unwrap_or_default();
     let current_paths: HashSet<_> = files
         .iter()
         .map(|file| file.relative_path.clone())

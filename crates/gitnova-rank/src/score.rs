@@ -98,7 +98,10 @@ fn rank_graph_with_embeddings_inner(
         .as_ref()
         .map(|ids| {
             let n = ids.len().max(1) as f64;
-            ids.iter().enumerate().map(|(i, id)| (id.clone(), 0.08 * (1.0 - i as f64 / n))).collect()
+            ids.iter()
+                .enumerate()
+                .map(|(i, id)| (id.clone(), 0.08 * (1.0 - i as f64 / n)))
+                .collect()
         })
         .unwrap_or_default();
 
@@ -162,7 +165,13 @@ fn score_node(
     let test_penalty = if node.metrics.is_test { 1.0 } else { 0.0 };
     let kind_bias = match node.kind {
         NodeKind::Function | NodeKind::Method | NodeKind::Macro => 0.08,
-        NodeKind::Class | NodeKind::Struct | NodeKind::Enum | NodeKind::Union | NodeKind::Typedef | NodeKind::Trait | NodeKind::Interface => 0.05,
+        NodeKind::Class
+        | NodeKind::Struct
+        | NodeKind::Enum
+        | NodeKind::Union
+        | NodeKind::Typedef
+        | NodeKind::Trait
+        | NodeKind::Interface => 0.05,
         NodeKind::Variable => -0.05,
         NodeKind::Module => -0.15,
         NodeKind::File => -0.02,

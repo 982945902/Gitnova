@@ -16,7 +16,7 @@ use gitnova_wiki::{
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -408,13 +408,15 @@ fn wiki_append_evidence(repo: &Path, arguments: &Value) -> Result<Value> {
 
     let wiki_root = wiki_root(repo, arguments);
     let store = WikiStore::open(&wiki_root)?;
-    store.append_evidence(id, evidence)?;
+    store.append_evidence(id, evidence.clone())?;
+    let source_published = store.publish_source_file(repo, &evidence.file)?;
     let page = store.read_page(id)?;
     Ok(json!({
         "status": "evidence_appended",
         "id": page.id,
         "wiki_root": wiki_root,
-        "evidence_count": page.evidence.len()
+        "evidence_count": page.evidence.len(),
+        "source_published": source_published
     }))
 }
 
@@ -499,15 +501,16 @@ fn wiki_deepen_page(repo: &Path, arguments: &Value) -> Result<Value> {
     }
 
     let result = agent.investigate(&task)?;
-    merge_investigation_result(&store, id, question, &result)?;
+    let merge = merge_investigation_result(&store, id, question, &result, &task.repo_path)?;
 
     Ok(json!({
         "status": "deepened",
         "id": id,
         "task_id": result.task_id,
         "wiki_root": wiki_root,
-        "sources_appended": result.sources.len(),
-        "followups_appended": result.followups.len(),
+        "sources_appended": merge.sources_appended,
+        "source_warnings": merge.source_warnings,
+        "followups_appended": merge.followups_appended,
         "confidence": result.confidence
     }))
 }
@@ -666,8 +669,8 @@ fn wiki_expand_tree(repo: &Path, arguments: &Value) -> Result<Value> {
             }));
             continue;
         };
-        match merge_investigation_result(&store, page_id, &task.question, &result) {
-            Ok(()) => {
+        match merge_investigation_result(&store, page_id, &task.question, &result, &repo_path) {
+            Ok(merge) => {
                 store.update_task_status(
                     page_id,
                     &task.id,
@@ -680,8 +683,9 @@ fn wiki_expand_tree(repo: &Path, arguments: &Value) -> Result<Value> {
                     "task_id": result.task_id,
                     "page_id": page_id,
                     "status": "done",
-                    "sources_appended": result.sources.len(),
-                    "followups_appended": result.followups.len(),
+                    "sources_appended": merge.sources_appended,
+                    "source_warnings": merge.source_warnings,
+                    "followups_appended": merge.followups_appended,
                     "confidence": result.confidence
                 }));
             }
@@ -719,14 +723,14 @@ fn merge_investigation_result(
     id: &str,
     question: &str,
     result: &InvestigationResult,
-) -> Result<()> {
+    repo_path: &Path,
+) -> Result<MergeSummary> {
     let mut public_patch = String::new();
-    public_patch.push_str("\n\n## Atlas Investigation\n");
-    public_patch.push_str(&format!("Question: {question}\n\n"));
+    public_patch.push_str("\n\n## Overview\n\n");
     public_patch.push_str(result.summary_markdown.trim());
     public_patch.push('\n');
     if let Some(diagram) = &result.diagram {
-        public_patch.push('\n');
+        public_patch.push_str("\n## Flow\n\n");
         public_patch.push_str(&diagram_markdown(diagram));
     }
     store.patch_page(
@@ -736,19 +740,94 @@ fn merge_investigation_result(
         PatchMode::Append,
     )?;
 
+    let mut sources_appended = 0usize;
+    let mut source_warnings = Vec::new();
     for source in &result.sources {
-        store.append_evidence(id, evidence_from_investigation_source(source))?;
+        match validate_investigation_source(repo_path, source) {
+            Ok(()) => {
+                store.append_evidence(id, evidence_from_investigation_source(source))?;
+                store.publish_source_file(repo_path, &source.file)?;
+                sources_appended += 1;
+            }
+            Err(warning) => source_warnings.push(warning.to_string()),
+        }
     }
 
+    let mut private_patch = String::new();
+    private_patch.push_str("Atlas Question\n");
+    private_patch.push_str(question.trim());
+    if !source_warnings.is_empty() {
+        private_patch.push_str("\n\nAtlas Source Warnings\n");
+        for warning in &source_warnings {
+            private_patch.push_str("- ");
+            private_patch.push_str(warning);
+            private_patch.push('\n');
+        }
+    }
     if !result.followups.is_empty() {
-        let mut private_patch = String::from("Atlas Follow-ups\n");
+        private_patch.push_str("\n\nAtlas Follow-ups\n");
         for followup in &result.followups {
             private_patch.push_str("- ");
             private_patch.push_str(followup);
             private_patch.push('\n');
         }
+    }
+    if !private_patch.trim().is_empty() {
         store.patch_private_note(id, private_patch.trim_end(), PatchMode::Append)?;
     }
+    Ok(MergeSummary {
+        sources_appended,
+        source_warnings: source_warnings.len(),
+        followups_appended: result.followups.len(),
+    })
+}
+
+struct MergeSummary {
+    sources_appended: usize,
+    source_warnings: usize,
+    followups_appended: usize,
+}
+
+fn validate_investigation_source(repo_path: &Path, source: &InvestigationSource) -> Result<()> {
+    let file = source.file.trim();
+    if file.is_empty() {
+        anyhow::bail!("empty source file path");
+    }
+    let relative_path = Path::new(file);
+    if relative_path.is_absolute() {
+        anyhow::bail!("{file}: absolute paths are not allowed");
+    }
+    if relative_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!("{file}: parent directory traversal is not allowed");
+    }
+
+    let full_path = repo_path.join(relative_path);
+    if !full_path.is_file() {
+        anyhow::bail!("{file}: source file does not exist");
+    }
+
+    let line_count = std::fs::read_to_string(&full_path)
+        .map(|content| content.lines().count() as u32)
+        .unwrap_or(0);
+    if let (Some(start), Some(end)) = (source.start_line, source.end_line) {
+        if start > end {
+            anyhow::bail!("{file}: start_line is after end_line ({start} > {end})");
+        }
+    }
+    if let Some(start) = source.start_line {
+        if start == 0 || start > line_count {
+            anyhow::bail!("{file}: start_line {start} is line out of range 1..={line_count}");
+        }
+    }
+    if let Some(end) = source.end_line {
+        if end == 0 || end > line_count {
+            anyhow::bail!("{file}: end_line {end} is line out of range 1..={line_count}");
+        }
+    }
+
     Ok(())
 }
 
@@ -1174,7 +1253,9 @@ mod tests {
         )
         .unwrap();
         assert!(html.contains("data-gitnova-evidence"));
-        assert!(!html.contains("executor creation entry</p>"));
+        assert!(html.contains("<h2>Source Spans</h2>"));
+        assert!(html.contains("aios/ha3/search/query_executor/QueryExecutorCreator.cpp:10-42"));
+        assert!(html.contains("executor creation entry"));
     }
 
     #[test]
@@ -1201,7 +1282,14 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let wiki_root = temp.path().join(".gitnova/wiki");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("aios/ha3/search/query_executor")).unwrap();
+        std::fs::write(
+            repo.join("aios/ha3/search/query_executor/QueryExecutorCreator.cpp"),
+            (1..=50)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
         let codex_bin = temp.path().join("fake-codex");
         std::fs::write(
             &codex_bin,
@@ -1259,6 +1347,7 @@ JSON
         assert_eq!(deepened["status"], "deepened");
         assert_eq!(deepened["task_id"], "trace-query-executor-creator");
         assert_eq!(deepened["sources_appended"], 1);
+        assert_eq!(deepened["source_warnings"], 0);
         assert_eq!(deepened["followups_appended"], 1);
 
         let html = std::fs::read_to_string(
@@ -1266,8 +1355,12 @@ JSON
                 .join(".gitnova/wiki/pages/ha3/search/query-executors.html"),
         )
         .unwrap();
+        assert!(html.contains("<h2>Overview</h2>"));
         assert!(html.contains("QueryExecutorCreator builds executor families"));
+        assert!(html.contains("<h2>Flow</h2>"));
         assert!(html.contains("<svg viewBox"));
+        assert!(!html.contains("Question: Trace QueryExecutorCreator"));
+        assert!(!html.contains("Atlas Investigation"));
         assert!(html.contains("data-gitnova-evidence"));
         assert!(!html.contains("Trace bitmap executor index reader dependencies.</p>"));
 
@@ -1286,6 +1379,88 @@ JSON
             .as_str()
             .unwrap()
             .contains("Trace bitmap executor index reader dependencies."));
+    }
+
+    #[test]
+    fn wiki_deepen_page_filters_invalid_source_spans_into_private_warnings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wiki_root = temp.path().join(".gitnova/wiki");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn first() {}\nfn second() {}\n").unwrap();
+        let codex_bin = temp.path().join("fake-codex");
+        std::fs::write(
+            &codex_bin,
+            r#"#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ] || [ "$prev" = "--output-last-message" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+cat > /dev/null
+cat > "$out" <<'JSON'
+{"task_id":"validate-sources","summary_markdown":"Validated source spans should be trustworthy.","sources":[{"file":"src/lib.rs","start_line":1,"end_line":2,"note":"valid span"},{"file":"src/missing.rs","start_line":1,"end_line":2,"note":"missing file"},{"file":"/tmp/outside.rs","start_line":1,"end_line":2,"note":"absolute path"},{"file":"src/lib.rs","start_line":5,"end_line":6,"note":"line out of range"},{"file":"src/lib.rs","start_line":2,"end_line":1,"note":"reversed span"}],"diagram":null,"followups":[],"confidence":0.7}
+JSON
+"#,
+        )
+        .unwrap();
+        make_executable(&codex_bin);
+
+        let mut repo_state = repo.clone();
+        call_tool(
+            "wiki_upsert_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "id": "ha3/search/query-executors",
+                "title": "Query Executors",
+                "kind": "article",
+                "content": "Initial skeleton."
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+
+        let deepened = call_tool(
+            "wiki_deepen_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "repo_path": repo,
+                "id": "ha3/search/query-executors",
+                "task_id": "validate-sources",
+                "question": "Validate source spans.",
+                "codex_bin": codex_bin,
+                "timeout_secs": 5
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let deepened = unwrap_tool_payload(deepened);
+        assert_eq!(deepened["sources_appended"], 1);
+        assert_eq!(deepened["source_warnings"], 4);
+
+        let page = call_tool(
+            "wiki_read_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "id": "ha3/search/query-executors",
+                "include_private": true
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let page = unwrap_tool_payload(page);
+        assert_eq!(page["page"]["evidence"].as_array().unwrap().len(), 1);
+        assert_eq!(page["page"]["evidence"][0]["file"], "src/lib.rs");
+        let private_note = page["private_note"].as_str().unwrap();
+        assert!(private_note.contains("Atlas Source Warnings"));
+        assert!(private_note.contains("src/missing.rs"));
+        assert!(private_note.contains("/tmp/outside.rs"));
+        assert!(private_note.contains("line out of range"));
+        assert!(private_note.contains("start_line is after end_line"));
     }
 
     #[test]
@@ -1377,7 +1552,8 @@ JSON
         let temp = tempfile::TempDir::new().unwrap();
         let wiki_root = temp.path().join(".gitnova/wiki");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn first() {}\nfn second() {}\n").unwrap();
         let codex_bin = temp.path().join("fake-codex");
         std::fs::write(
             &codex_bin,

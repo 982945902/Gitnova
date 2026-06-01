@@ -233,13 +233,8 @@ mod tests {
             .collect();
 
         // Use local-hash provider (pure computation, no external deps)
-        let examples = generate_training_examples(
-            &graph,
-            &embeddings,
-                        LOCAL_HASH_PROVIDER,
-            100,
-        )
-        .unwrap();
+        let examples =
+            generate_training_examples(&graph, &embeddings, LOCAL_HASH_PROVIDER, 100).unwrap();
 
         assert!(!examples.is_empty());
         // Each example should include the query node itself

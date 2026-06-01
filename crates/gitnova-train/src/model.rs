@@ -13,18 +13,18 @@
 //! The GNN operates on per-step induced subgraphs G_t[V_t ∪ U_t],
 //! not the full bounded subgraph.
 
-use candle_core::{Device, Result, Tensor};
 #[cfg(test)]
 use candle_core::DType;
-use candle_nn::{layer_norm, linear, Linear, LayerNorm, Module, VarBuilder};
+use candle_core::{Device, Result, Tensor};
+use candle_nn::{layer_norm, linear, LayerNorm, Linear, Module, VarBuilder};
 
 /// Trainer configuration matching inference SeedERConfig.
 pub struct ModelConfig {
     pub input_dim: usize,
     pub hidden_dim: usize,
     pub num_layers: usize,
-    pub num_heads: usize,     // attention heads per layer
-    pub ff_dim: usize,         // feed-forward intermediate dim
+    pub num_heads: usize, // attention heads per layer
+    pub ff_dim: usize,    // feed-forward intermediate dim
     pub device: Device,
 }
 
@@ -44,15 +44,15 @@ impl Default for ModelConfig {
 /// One Graph Transformer layer.
 struct TransformerLayer {
     // Self-attention
-    q_proj: Linear,      // hidden_dim → hidden_dim
+    q_proj: Linear, // hidden_dim → hidden_dim
     k_proj: Linear,
     v_proj: Linear,
-    out_proj: Linear,    // hidden_dim → hidden_dim
+    out_proj: Linear, // hidden_dim → hidden_dim
     // Query injection
-    query_proj: Linear,  // hidden_dim → hidden_dim
+    query_proj: Linear, // hidden_dim → hidden_dim
     // Feed-forward
-    ff1: Linear,         // hidden_dim → ff_dim
-    ff2: Linear,         // ff_dim → hidden_dim
+    ff1: Linear, // hidden_dim → ff_dim
+    ff2: Linear, // ff_dim → hidden_dim
     // Layer norms (2: after attention, after FFN)
     ln1: LayerNorm,
     ln2: LayerNorm,
@@ -63,7 +63,10 @@ struct TransformerLayer {
 impl TransformerLayer {
     fn new(hidden_dim: usize, num_heads: usize, ff_dim: usize, vb: VarBuilder) -> Result<Self> {
         let head_dim = hidden_dim / num_heads;
-        assert!(hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads");
+        assert!(
+            hidden_dim % num_heads == 0,
+            "hidden_dim must be divisible by num_heads"
+        );
         Ok(Self {
             q_proj: linear(hidden_dim, hidden_dim, vb.pp("q"))?,
             k_proj: linear(hidden_dim, hidden_dim, vb.pp("k"))?,
@@ -84,9 +87,18 @@ impl TransformerLayer {
         let d = h.dims()[1];
 
         // ── Multi-head self-attention ──
-        let q = self.q_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
-        let k = self.k_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
-        let v = self.v_proj.forward(h)?.reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+        let q = self
+            .q_proj
+            .forward(h)?
+            .reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+        let k = self
+            .k_proj
+            .forward(h)?
+            .reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
+        let v = self
+            .v_proj
+            .forward(h)?
+            .reshape((n, self.num_heads, self.head_dim))?; // [N, H, D_h]
 
         // QK^T: [N, H, D_h] × [N, H, D_h]ᵀ via transpose
         // q: [N, H, D_h] → need [H, N, D_h] for bmm
@@ -122,23 +134,27 @@ impl TransformerLayer {
 
 /// Graph Transformer model with policy head and scoring head.
 pub struct GraphTransformerModel {
-    input_proj: Option<Linear>,         // input_dim → hidden_dim (None if dims match)
+    input_proj: Option<Linear>, // input_dim → hidden_dim (None if dims match)
     layers: Vec<TransformerLayer>,
     // Policy head: g_θ(h_u, z_q) — explicit dual input
-    policy_proj_h: Linear,              // hidden_dim → hidden_dim
-    policy_proj_q: Linear,              // hidden_dim → hidden_dim
-    policy_out: Linear,                 // hidden_dim → 1
+    policy_proj_h: Linear, // hidden_dim → hidden_dim
+    policy_proj_q: Linear, // hidden_dim → hidden_dim
+    policy_out: Linear,    // hidden_dim → 1
     // Scoring head: ϕ_θ(h_v, z_q) — explicit dual input
-    scoring_proj_h: Linear,             // hidden_dim → hidden_dim
-    scoring_proj_q: Linear,             // hidden_dim → hidden_dim
-    scoring_out: Linear,                // hidden_dim → 1
+    scoring_proj_h: Linear, // hidden_dim → hidden_dim
+    scoring_proj_q: Linear, // hidden_dim → hidden_dim
+    scoring_out: Linear,    // hidden_dim → 1
     config: ModelConfig,
 }
 
 impl GraphTransformerModel {
     pub fn new(config: &ModelConfig, vb: VarBuilder) -> Result<Self> {
         let input_proj = if config.input_dim != config.hidden_dim {
-            Some(linear(config.input_dim, config.hidden_dim, vb.pp("input_proj"))?)
+            Some(linear(
+                config.input_dim,
+                config.hidden_dim,
+                vb.pp("input_proj"),
+            )?)
         } else {
             None
         };
@@ -146,7 +162,9 @@ impl GraphTransformerModel {
         let mut layers = Vec::with_capacity(config.num_layers);
         for i in 0..config.num_layers {
             layers.push(TransformerLayer::new(
-                config.hidden_dim, config.num_heads, config.ff_dim,
+                config.hidden_dim,
+                config.num_heads,
+                config.ff_dim,
                 vb.pp(format!("layer_{i}")),
             )?);
         }
@@ -176,7 +194,7 @@ impl GraphTransformerModel {
     /// Returns (hidden_states [N, D_hid], policy_logits [N, 1], scores [N, 1]).
     pub fn forward(
         &self,
-        node_features: &Tensor,  // [N, D_in] — only V_t ∪ U_t nodes
+        node_features: &Tensor,   // [N, D_in] — only V_t ∪ U_t nodes
         query_embedding: &Tensor, // [D_in]
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let n = node_features.dims()[0];
@@ -200,13 +218,20 @@ impl GraphTransformerModel {
 
         // ── Policy head: g_θ(h_u, z_q) ──
         let h_pol = self.policy_proj_h.forward(&h)?;
-        let q_pol = self.policy_proj_q.forward(&q)?.expand((n, self.config.hidden_dim))?;
+        let q_pol = self
+            .policy_proj_q
+            .forward(&q)?
+            .expand((n, self.config.hidden_dim))?;
         let policy_logits = self.policy_out.forward(&(h_pol.add(&q_pol)?.relu()?))?;
 
         // ── Scoring head: ϕ_θ(h_v, z_q) ──
         let h_sc = self.scoring_proj_h.forward(&h)?;
-        let q_sc = self.scoring_proj_q.forward(&q)?.expand((n, self.config.hidden_dim))?;
-        let scores = candle_nn::ops::sigmoid(&self.scoring_out.forward(&(h_sc.add(&q_sc)?.relu()?))?)?;
+        let q_sc = self
+            .scoring_proj_q
+            .forward(&q)?
+            .expand((n, self.config.hidden_dim))?;
+        let scores =
+            candle_nn::ops::sigmoid(&self.scoring_out.forward(&(h_sc.add(&q_sc)?.relu()?))?)?;
 
         Ok((h, policy_logits, scores))
     }
@@ -215,13 +240,12 @@ impl GraphTransformerModel {
     /// `frontier` contains indices into the current induced subgraph nodes.
     pub fn expand_step(
         &self,
-        node_features: &Tensor,    // [N, D_in] — V_t ∪ U_t
-        query_embedding: &Tensor,  // [D_in]
-        frontier: &[usize],        // indices within node_features
+        node_features: &Tensor,   // [N, D_in] — V_t ∪ U_t
+        query_embedding: &Tensor, // [D_in]
+        frontier: &[usize],       // indices within node_features
         top_c: usize,
     ) -> Result<(Vec<usize>, Tensor)> {
-        let (_h, policy_logits, _scores) =
-            self.forward(node_features, query_embedding)?;
+        let (_h, policy_logits, _scores) = self.forward(node_features, query_embedding)?;
 
         let frontier_indices = Tensor::from_vec(
             frontier.iter().map(|&i| i as i64).collect::<Vec<_>>(),
@@ -245,8 +269,7 @@ impl GraphTransformerModel {
         query_embedding: &Tensor,
         frontier: &[usize],
     ) -> Result<Tensor> {
-        let (_h, policy_logits, _scores) =
-            self.forward(node_features, query_embedding)?;
+        let (_h, policy_logits, _scores) = self.forward(node_features, query_embedding)?;
 
         let frontier_indices = Tensor::from_vec(
             frontier.iter().map(|&i| i as i64).collect::<Vec<_>>(),
@@ -324,9 +347,7 @@ mod tests {
         let query = Tensor::ones(4, DType::F32, &config.device).unwrap();
         let frontier = vec![1usize, 2];
 
-        let (selected, _) = model
-            .expand_step(&features, &query, &frontier, 1)
-            .unwrap();
+        let (selected, _) = model.expand_step(&features, &query, &frontier, 1).unwrap();
         assert_eq!(selected.len(), 1);
     }
 }

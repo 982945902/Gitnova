@@ -9,9 +9,7 @@ pub fn detect_language(path: impl AsRef<Path>) -> Option<Language> {
         "ts" | "tsx" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         "py" => Some(Language::Python),
-        "cpp" | "cxx" | "cc" | "c++" | "hpp" | "hxx" | "hh" | "h" | "c" => {
-            Some(Language::Cpp)
-        }
+        "cpp" | "cxx" | "cc" | "c++" | "hpp" | "hxx" | "hh" | "h" | "c" => Some(Language::Cpp),
         _ => None,
     }
 }

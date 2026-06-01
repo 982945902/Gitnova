@@ -1,6 +1,6 @@
 pub mod json_export;
-pub mod types;
 pub mod surrealdb;
+pub mod types;
 
 pub use surrealdb::{Db, SurrealStore};
 pub use types::{FileManifestEntry, StoredEmbedding};

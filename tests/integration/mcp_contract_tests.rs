@@ -124,7 +124,10 @@ fn mcp_stdio_lists_tools_resources_and_calls_index() {
         .contains("indexed"));
 
     // Debug: print actual response[4]
-    eprintln!("RESPONSE[4]: {}", serde_json::to_string(&responses[4]).unwrap());
+    eprintln!(
+        "RESPONSE[4]: {}",
+        serde_json::to_string(&responses[4]).unwrap()
+    );
     assert!(
         serde_json::to_string(&responses[4])
             .unwrap()

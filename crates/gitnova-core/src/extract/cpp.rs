@@ -19,10 +19,8 @@ pub fn extract(parsed: &ParsedFile) -> FileExtraction {
 
 fn extract_heuristic(parsed: &ParsedFile) -> FileExtraction {
     let path = &parsed.source.relative_path;
-    let include_re =
-        Regex::new(r#"^\s*#include\s+[<"]([^>"]+)[>"]"#).unwrap();
-    let class_struct_re =
-        Regex::new(r"^\s*(class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+    let include_re = Regex::new(r#"^\s*#include\s+[<"]([^>"]+)[>"]"#).unwrap();
+    let class_struct_re = Regex::new(r"^\s*(class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
     let namespace_re = Regex::new(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
     let mut extraction = FileExtraction::default();
     let mut symbols = Vec::new();
@@ -212,7 +210,8 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
         } else {
             None
         };
-        let qualified = build_qualified_from_enclosing(def_node, source, &name, &kind, class_for_qname);
+        let qualified =
+            build_qualified_from_enclosing(def_node, source, &name, &kind, class_for_qname);
 
         // Extract base classes for class/struct
         let base_classes = if matches!(kind, NodeKind::Class | NodeKind::Struct) {
@@ -228,7 +227,7 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
             path: path.to_string(),
             span: span_from_node(def_node),
             text: String::new(),
-            calls: Vec::new(),      // filled later by fill_symbol_text_and_calls
+            calls: Vec::new(), // filled later by fill_symbol_text_and_calls
             tags: vec!["tree-sitter".into(), "query".into()],
             base_classes,
         });
@@ -245,16 +244,55 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
 fn is_cpp_keyword_or_literal(name: &str) -> bool {
     matches!(
         name,
-        "true" | "false" | "nullptr" | "NULL" | "this"
-            | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
-            | "return" | "break" | "continue" | "goto" | "throw"
-            | "class" | "struct" | "enum" | "union" | "namespace"
-            | "public" | "private" | "protected" | "virtual" | "static"
-            | "const" | "volatile" | "inline" | "explicit" | "friend"
-            | "template" | "typename" | "typedef"
-            | "new" | "delete" | "sizeof" | "typeid"
-            | "try" | "catch" | "noexcept" | "override" | "final"
-            | "auto" | "decltype" | "constexpr" | "consteval" | "constinit"
+        "true"
+            | "false"
+            | "nullptr"
+            | "NULL"
+            | "this"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "switch"
+            | "case"
+            | "return"
+            | "break"
+            | "continue"
+            | "goto"
+            | "throw"
+            | "class"
+            | "struct"
+            | "enum"
+            | "union"
+            | "namespace"
+            | "public"
+            | "private"
+            | "protected"
+            | "virtual"
+            | "static"
+            | "const"
+            | "volatile"
+            | "inline"
+            | "explicit"
+            | "friend"
+            | "template"
+            | "typename"
+            | "typedef"
+            | "new"
+            | "delete"
+            | "sizeof"
+            | "typeid"
+            | "try"
+            | "catch"
+            | "noexcept"
+            | "override"
+            | "final"
+            | "auto"
+            | "decltype"
+            | "constexpr"
+            | "consteval"
+            | "constinit"
     ) || name.starts_with("__") // compiler builtins
 }
 
@@ -644,9 +682,9 @@ void BuildWorkItem::doProcess() {}
             .iter()
             .find(|node| node.name == "WorkItemBase" && node.kind == NodeKind::Class)
             .unwrap();
-        assert!(extends_edges.iter().any(|edge| {
-            edge.from == build_work_item.id && edge.to == work_item_base.id
-        }));
+        assert!(extends_edges
+            .iter()
+            .any(|edge| { edge.from == build_work_item.id && edge.to == work_item_base.id }));
     }
 
     #[test]
@@ -679,9 +717,16 @@ void BuildWorkItem::doProcess() {}
             .iter()
             .filter(|node| node.name == "InvertedIndexSearchTracer" && node.kind == NodeKind::Class)
             .collect();
-        assert!(!tracer_classes.is_empty(), "InvertedIndexSearchTracer class must survive cross-file dedup");
+        assert!(
+            !tracer_classes.is_empty(),
+            "InvertedIndexSearchTracer class must survive cross-file dedup"
+        );
         // util::InvertedIndexSearchTracer MUST NOT be merged into indexlib variants
-        assert!(tracer_classes.iter().any(|n| n.qualified_name.contains("util")),
-            "util::InvertedIndexSearchTracer should not be merged into indexlib:: variants");
+        assert!(
+            tracer_classes
+                .iter()
+                .any(|n| n.qualified_name.contains("util")),
+            "util::InvertedIndexSearchTracer should not be merged into indexlib:: variants"
+        );
     }
 }

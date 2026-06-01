@@ -99,6 +99,112 @@ fn patch_page_content_preserves_evidence_and_journal() -> anyhow::Result<()> {
 }
 
 #[test]
+fn evidence_renders_as_public_source_spans() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+    let repo = temp.path().join("repo");
+    let source_file = repo.join("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp");
+    std::fs::create_dir_all(source_file.parent().unwrap())?;
+    std::fs::write(
+        &source_file,
+        (1..=220)
+            .map(|line| format!("source line {line}\n"))
+            .collect::<String>(),
+    )?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "## Overview\n\nQuery executors route parsed query nodes into concrete executor families.",
+        PatchMode::Replace,
+    )?;
+    store.append_evidence(
+        "ha3/search/query-executors",
+        Evidence::new("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp")
+            .with_span(124, 217)
+            .with_note("Term executor factory and posting-type dispatch."),
+    )?;
+    assert!(store.publish_source_file(
+        &repo,
+        "aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp"
+    )?);
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("<aside class=\"source-spans\""));
+    assert!(html.contains("<h2>Source Spans</h2>"));
+    assert!(html.contains(
+        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124\""
+    ));
+    assert!(html.contains("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp:124-217"));
+    assert!(html.contains("Term executor factory and posting-type dispatch."));
+    assert!(html.contains("data-gitnova-evidence"));
+    let source_html =
+        std::fs::read_to_string(temp.path().join(
+            "pages/_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html",
+        ))?;
+    assert!(source_html
+        .contains("<h1>aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp</h1>"));
+    assert!(source_html.contains("id=\"L124\""));
+    assert!(source_html.contains("source line 124"));
+
+    Ok(())
+}
+
+#[test]
+fn source_markers_render_inline_citations_instead_of_bottom_list() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+    let repo = temp.path().join("repo");
+    let source_file = repo.join("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp");
+    std::fs::create_dir_all(source_file.parent().unwrap())?;
+    std::fs::write(
+        &source_file,
+        (1..=220)
+            .map(|line| format!("source line {line}\n"))
+            .collect::<String>(),
+    )?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.append_evidence(
+        "ha3/search/query-executors",
+        Evidence::new("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp")
+            .with_span(124, 217)
+            .with_note("Term executor factory and posting-type dispatch."),
+    )?;
+    assert!(store.publish_source_file(
+        &repo,
+        "aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp"
+    )?);
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "Term queries call `createTermQueryExecutor`. {{source:1}}",
+        PatchMode::Replace,
+    )?;
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("class=\"source-cite\""));
+    assert!(html.contains(">Term queries call <code>createTermQueryExecutor</code>. <a"));
+    assert!(html.contains(
+        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124\""
+    ));
+    assert!(html.contains("[1]</a>"));
+    assert!(!html.contains("<aside class=\"source-spans\""));
+    assert!(html.contains("data-gitnova-evidence"));
+
+    Ok(())
+}
+
+#[test]
 fn nested_article_renders_breadcrumbs_and_wiki_tree_navigation() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let store = WikiStore::open(temp.path())?;
@@ -234,6 +340,82 @@ fn markdown_renders_lists_inline_code_and_wrapped_paragraphs() -> anyhow::Result
     assert!(html.contains("<li>OR queries create <code>OrQueryExecutor</code>.</li>"));
     assert!(html.contains("<strong>bitmap-aware</strong>"));
     assert!(!html.contains("<p>- Term queries"));
+
+    Ok(())
+}
+
+#[test]
+fn markdown_renders_tables_and_code_blocks_with_readable_styles() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "| Method | Role |\n| --- | --- |\n| `visitTermQuery` | Term dispatch |\n\n```cpp\n_queryExecutor = createTermQueryExecutor(term);\n```",
+        PatchMode::Replace,
+    )?;
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("<table>"));
+    assert!(html.contains("<th>Method</th>"));
+    assert!(html.contains("<code>visitTermQuery</code>"));
+    assert!(html.contains("<pre><code class=\"language-cpp\">"));
+    assert!(html.contains("_queryExecutor = createTermQueryExecutor(term);"));
+    assert!(html.contains("table {"));
+    assert!(html.contains("pre {"));
+
+    Ok(())
+}
+
+#[test]
+fn updating_outline_task_status_refreshes_private_note_task_state() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.apply_outline(gitnova_wiki::WikiOutline {
+        root: "ha3".to_string(),
+        pages: vec![gitnova_wiki::OutlinePage {
+            id: "ha3/search/query-executors".to_string(),
+            title: "Query Executors".to_string(),
+            kind: PageKind::Article,
+            summary: None,
+            parent: None,
+            purpose: Some("Explain executor creation.".to_string()),
+            content: None,
+            deep_tasks: vec![gitnova_wiki::DeepTask {
+                id: "trace-query-executor-creator".to_string(),
+                question: "Trace QueryExecutorCreator.".to_string(),
+                scope_paths: vec![],
+                scope_symbols: vec![],
+                expected_outputs: vec![],
+                status: gitnova_wiki::TaskStatus::Pending,
+                confidence: None,
+                error: None,
+            }],
+        }],
+        version: 1,
+    })?;
+
+    let pending_note = store.read_private_note("ha3/search/query-executors")?;
+    assert!(pending_note.contains("- [pending] trace-query-executor-creator"));
+
+    store.update_task_status(
+        "ha3/search/query-executors",
+        "trace-query-executor-creator",
+        gitnova_wiki::TaskStatus::Done,
+        Some(0.91),
+        None,
+    )?;
+
+    let done_note = store.read_private_note("ha3/search/query-executors")?;
+    assert!(done_note.contains("- [done] trace-query-executor-creator"));
+    assert!(!done_note.contains("- [pending] trace-query-executor-creator"));
 
     Ok(())
 }
