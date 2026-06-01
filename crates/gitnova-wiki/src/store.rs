@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
 
-use crate::types::{ContentFormat, Evidence, PageKind, PatchMode, WikiNode, WikiPage, WikiSchema};
+use crate::types::{
+    ContentFormat, DeepTask, Evidence, PageKind, PatchMode, TaskStatus, WikiNode, WikiOutline,
+    WikiPage, WikiSchema,
+};
 
 pub struct WikiStore {
     root: PathBuf,
@@ -28,6 +32,94 @@ impl WikiStore {
     pub fn read_schema(&self) -> Result<WikiSchema> {
         let raw = fs::read_to_string(self.schema_path()).context("read wiki schema")?;
         serde_json::from_str(&raw).context("parse wiki schema")
+    }
+
+    pub fn apply_outline(&self, mut outline: WikiOutline) -> Result<()> {
+        outline.version = 1;
+        for page in &outline.pages {
+            let mut wiki_page = WikiPage::new(&page.id, &page.title, page.kind);
+            wiki_page.summary = page.summary.clone();
+            wiki_page.parent = page.parent.clone();
+            self.upsert_page(wiki_page)?;
+            if let Some(content) = &page.content {
+                self.patch_page(
+                    &page.id,
+                    ContentFormat::Markdown,
+                    content,
+                    PatchMode::Replace,
+                )?;
+            }
+            let private_note = outline_private_note(page.purpose.as_deref(), &page.deep_tasks);
+            if !private_note.is_empty() {
+                self.patch_private_note(&page.id, &private_note, PatchMode::Replace)?;
+            }
+        }
+        self.write_outline(&outline)?;
+        self.append_journal("apply_outline", &outline.root)
+    }
+
+    pub fn read_outline(&self) -> Result<WikiOutline> {
+        let path = self.outline_path();
+        if !path.exists() {
+            return Ok(WikiOutline::default());
+        }
+        let raw = fs::read_to_string(path).context("read wiki outline")?;
+        serde_json::from_str(&raw).context("parse wiki outline")
+    }
+
+    pub fn write_outline(&self, outline: &WikiOutline) -> Result<()> {
+        let raw = serde_json::to_string_pretty(outline)?;
+        fs::write(self.outline_path(), raw)?;
+        Ok(())
+    }
+
+    pub fn pending_tasks(
+        &self,
+        root_page_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, DeepTask)>> {
+        let outline = self.read_outline()?;
+        let mut tasks = Vec::new();
+        for page in outline.pages {
+            if !is_page_under_root(&page.id, root_page_id) {
+                continue;
+            }
+            for task in page.deep_tasks {
+                if task.status == TaskStatus::Pending {
+                    tasks.push((page.id.clone(), task));
+                    if tasks.len() >= limit {
+                        return Ok(tasks);
+                    }
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
+    pub fn update_task_status(
+        &self,
+        page_id: &str,
+        task_id: &str,
+        status: TaskStatus,
+        confidence: Option<f32>,
+        error: Option<String>,
+    ) -> Result<()> {
+        let mut outline = self.read_outline()?;
+        let page = outline
+            .pages
+            .iter_mut()
+            .find(|page| page.id == page_id)
+            .ok_or_else(|| anyhow!("outline page not found: {page_id}"))?;
+        let task = page
+            .deep_tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| anyhow!("outline task not found: {task_id}"))?;
+        task.status = status;
+        task.confidence = confidence;
+        task.error = error;
+        self.write_outline(&outline)?;
+        self.append_journal("update_task_status", page_id)
     }
 
     pub fn upsert_page(&self, page: WikiPage) -> Result<()> {
@@ -234,6 +326,46 @@ impl WikiStore {
     fn schema_path(&self) -> PathBuf {
         self.root.join("schema.json")
     }
+
+    fn outline_path(&self) -> PathBuf {
+        self.root.join("outline.json")
+    }
+}
+
+fn outline_private_note(purpose: Option<&str>, tasks: &[DeepTask]) -> String {
+    let mut note = String::new();
+    if let Some(purpose) = purpose {
+        if !purpose.trim().is_empty() {
+            note.push_str("Purpose\n");
+            note.push_str(purpose.trim());
+            note.push('\n');
+        }
+    }
+    if !tasks.is_empty() {
+        if !note.is_empty() {
+            note.push('\n');
+        }
+        note.push_str("Deep Tasks\n");
+        for task in tasks {
+            note.push_str("- [");
+            note.push_str(match task.status {
+                TaskStatus::Pending => "pending",
+                TaskStatus::Running => "running",
+                TaskStatus::Done => "done",
+                TaskStatus::Failed => "failed",
+            });
+            note.push_str("] ");
+            note.push_str(&task.id);
+            note.push_str(": ");
+            note.push_str(&task.question);
+            note.push('\n');
+        }
+    }
+    note.trim_end().to_string()
+}
+
+fn is_page_under_root(page_id: &str, root_page_id: &str) -> bool {
+    page_id == root_page_id || page_id.starts_with(&format!("{root_page_id}/"))
 }
 
 fn normalize_id(id: &str) -> Result<String> {
@@ -319,6 +451,11 @@ main { max-width: 1040px; width: 100%; margin: 0 auto; padding: 40px 28px 72px; 
 h1 { font-size: 34px; line-height: 1.15; margin: 8px 0 10px; }
 h2 { font-size: 20px; margin: 28px 0 12px; }
 p { margin: 8px 0; }
+ul, ol { padding-left: 24px; margin: 10px 0 14px; }
+li { margin: 6px 0; }
+code { background: #edf2f0; border: 1px solid #dce6e2; border-radius: 5px; padding: 1px 5px; font-size: .92em; }
+pre code { display: block; padding: 12px; overflow-x: auto; }
+strong { font-weight: 800; }
 .summary { max-width: 780px; color: var(--muted); font-size: 16px; }
 .child-pages ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; padding: 0; margin: 0; list-style: none; align-items: stretch; }
 .child-pages li { min-height: 132px; }
@@ -332,6 +469,7 @@ article { margin-top: 26px; background: var(--panel); border: 1px solid var(--li
 article h2:first-child { margin-top: 0; }
 .diagram-block { margin: 18px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #fcfefd; padding: 14px; }
 .diagram-block svg { display: block; max-width: 100%; height: auto; }
+.diagram-block pre { margin: 0; white-space: pre; font-size: 0.92rem; line-height: 1.55; }
 @media (max-width: 640px) { .app-shell { display: block; } .wiki-sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); } }
 </style>"#,
     );
@@ -387,7 +525,17 @@ article h2:first-child { margin-top: 0; }
             escape_script_json(&serde_json::to_string(&node.evidence).unwrap_or_default())
         ));
     }
-    html.push_str("</main></div></body></html>");
+    html.push_str("</main></div>");
+    if page_uses_mermaid(node.content_format, content) {
+        html.push_str(
+            r#"<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><script>
+if (window.mermaid) {
+  window.mermaid.initialize({ startOnLoad: true, securityLevel: "strict" });
+}
+</script>"#,
+        );
+    }
+    html.push_str("</body></html>");
     html
 }
 
@@ -500,34 +648,82 @@ fn relative_href(from_page_ref: &str, to_page_ref: &str) -> String {
 
 fn render_markdown(content: &str) -> String {
     let mut html = String::new();
-    let mut svg_block = None::<String>;
-    for line in content.lines() {
-        if line.trim() == "```svg" {
-            svg_block = Some(String::new());
-        } else if line.trim() == "```" && svg_block.is_some() {
-            let svg = svg_block.take().unwrap_or_default();
-            html.push_str("<div class=\"diagram-block\">");
-            html.push_str(&svg);
-            html.push_str("</div>");
-        } else if let Some(svg) = svg_block.as_mut() {
-            svg.push_str(line);
-            svg.push('\n');
-        } else if let Some(text) = line.strip_prefix("## ") {
-            html.push_str(&format!("<h2>{}</h2>", escape_html(text)));
-        } else if let Some(text) = line.strip_prefix("# ") {
-            html.push_str(&format!("<h1>{}</h1>", escape_html(text)));
-        } else if line.trim().is_empty() {
-            continue;
-        } else {
-            html.push_str(&format!("<p>{}</p>", escape_html(line)));
+    let parser = Parser::new_ext(
+        content,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
+    );
+    let mut events = Vec::new();
+    let mut diagram_block = None::<(String, String)>;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language)))
+                if matches!(language.as_ref(), "svg" | "mermaid") =>
+            {
+                diagram_block = Some((language.to_string(), String::new()));
+            }
+            Event::End(TagEnd::CodeBlock) if diagram_block.is_some() => {
+                let (format, diagram) = diagram_block.take().unwrap_or_default();
+                events.push(Event::Html(CowStr::from(render_diagram_block(
+                    &format, &diagram,
+                ))));
+            }
+            Event::Text(text) if diagram_block.is_some() => {
+                if let Some((_, diagram)) = diagram_block.as_mut() {
+                    diagram.push_str(&text);
+                }
+            }
+            Event::Code(text) if diagram_block.is_some() => {
+                if let Some((_, diagram)) = diagram_block.as_mut() {
+                    diagram.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if diagram_block.is_some() => {
+                if let Some((_, diagram)) = diagram_block.as_mut() {
+                    diagram.push('\n');
+                }
+            }
+            _event if diagram_block.is_some() => {}
+            event => events.push(event),
         }
     }
-    if let Some(svg) = svg_block {
-        html.push_str("<pre><code>");
-        html.push_str(&escape_html(&svg));
-        html.push_str("</code></pre>");
+
+    if let Some((format, diagram)) = diagram_block {
+        events.push(Event::Html(CowStr::from(format!(
+            "<pre><code>{}\n{}</code></pre>",
+            escape_html(&format),
+            escape_html(&diagram)
+        ))));
     }
+
+    html::push_html(&mut html, events.into_iter());
     html
+}
+
+fn render_diagram_block(format: &str, diagram: &str) -> String {
+    match format {
+        "svg" => format!("<div class=\"diagram-block\">{diagram}</div>"),
+        "mermaid" => format!(
+            "<div class=\"diagram-block\" data-diagram-format=\"mermaid\"><pre class=\"mermaid\">{}</pre></div>",
+            escape_html(diagram)
+        ),
+        _ => format!(
+            "<pre><code>{}\n{}</code></pre>",
+            escape_html(format),
+            escape_html(diagram)
+        ),
+    }
+}
+
+fn page_uses_mermaid(format: ContentFormat, content: &str) -> bool {
+    match format {
+        ContentFormat::Markdown => content
+            .lines()
+            .any(|line| line.trim_start().starts_with("```mermaid")),
+        ContentFormat::Html => {
+            content.contains("class=\"mermaid\"") || content.contains("class='mermaid'")
+        }
+    }
 }
 
 fn escape_html(value: &str) -> String {

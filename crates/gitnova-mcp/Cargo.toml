@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+gitnova-atlas = { path = "../gitnova-atlas" }
 gitnova-core = { path = "../gitnova-core" }
 gitnova-dashboard = { path = "../gitnova-dashboard" }
 gitnova-enrich = { path = "../gitnova-enrich" }

@@ -1,4 +1,8 @@
 use anyhow::Result;
+use gitnova_atlas::{
+    investigate_many, CodexCliAgent, InvestigationBudget, InvestigationDiagram,
+    InvestigationResult, InvestigationScope, InvestigationSource, InvestigationTask,
+};
 use gitnova_core::{build_graph_from_entries, query, scan_repository, CodeGraph};
 use gitnova_enrich::embeddings::{self, MODEL2VEC_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
@@ -6,7 +10,9 @@ use gitnova_enrich::llm;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_embeddings};
 use gitnova_storage::{FileManifestEntry, SurrealStore};
-use gitnova_wiki::{ContentFormat, Evidence, PageKind, PatchMode, WikiPage, WikiStore};
+use gitnova_wiki::{
+    ContentFormat, Evidence, PageKind, PatchMode, TaskStatus, WikiOutline, WikiPage, WikiStore,
+};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -89,7 +95,11 @@ pub fn list_tools() -> Value {
             tool("wiki_patch_page", "Patch public Gitnova wiki page content and render HTML"),
             tool("wiki_patch_private_note", "Patch private agent-only notes for a Gitnova wiki page"),
             tool("wiki_append_evidence", "Append machine-readable evidence to a Gitnova wiki page"),
-            tool("wiki_read_page", "Read a Gitnova wiki page and optional private note")
+            tool("wiki_read_page", "Read a Gitnova wiki page and optional private note"),
+            tool("wiki_deepen_page", "Run an Atlas child Codex investigation and merge the result into a wiki page"),
+            tool("wiki_apply_outline", "Apply a Codex-authored wiki outline and deep task queue"),
+            tool("wiki_read_outline", "Read the current Codex-authored wiki outline"),
+            tool("wiki_expand_tree", "Run pending outline tasks with parallel Atlas child Codex agents")
         ]
     })
 }
@@ -106,6 +116,14 @@ fn tool(name: &str, description: &str) -> Value {
 }
 
 pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Result<Value> {
+    if wiki_tool_is_disabled_inside_atlas_child_agent(
+        name,
+        std::env::var_os("GITNOVA_ATLAS_CHILD").is_some(),
+        std::env::var_os("GITNOVA_DISABLE_MCP_RECURSION").is_some(),
+    ) {
+        anyhow::bail!("wiki MCP tools are disabled inside Atlas child agent");
+    }
+
     let output = match name {
         "index_project" => {
             let path = arguments
@@ -264,6 +282,10 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
         "wiki_patch_private_note" => wiki_patch_private_note(repo_state, arguments)?,
         "wiki_append_evidence" => wiki_append_evidence(repo_state, arguments)?,
         "wiki_read_page" => wiki_read_page(repo_state, arguments)?,
+        "wiki_deepen_page" => wiki_deepen_page(repo_state, arguments)?,
+        "wiki_apply_outline" => wiki_apply_outline(repo_state, arguments)?,
+        "wiki_read_outline" => wiki_read_outline(repo_state, arguments)?,
+        "wiki_expand_tree" => wiki_expand_tree(repo_state, arguments)?,
         other => json!({ "error": format!("unknown tool {other}") }),
     };
     Ok(json!({
@@ -272,6 +294,14 @@ pub fn call_tool(name: &str, arguments: &Value, repo_state: &mut PathBuf) -> Res
         ],
         "isError": false
     }))
+}
+
+fn wiki_tool_is_disabled_inside_atlas_child_agent(
+    name: &str,
+    is_atlas_child: bool,
+    recursion_disabled: bool,
+) -> bool {
+    name.starts_with("wiki_") && is_atlas_child && recursion_disabled
 }
 
 fn wiki_upsert_page(repo: &Path, arguments: &Value) -> Result<Value> {
@@ -410,6 +440,335 @@ fn wiki_read_page(repo: &Path, arguments: &Value) -> Result<Value> {
     }))
 }
 
+fn wiki_deepen_page(repo: &Path, arguments: &Value) -> Result<Value> {
+    let id = required_str(arguments, "id")?;
+    let question = required_str(arguments, "question")?;
+    let wiki_root = wiki_root(repo, arguments);
+    let store = WikiStore::open(&wiki_root)?;
+    let page = store.read_page(id)?;
+    if page.content_format != ContentFormat::Markdown {
+        anyhow::bail!("wiki_deepen_page currently supports markdown pages only");
+    }
+
+    let repo_path = arguments
+        .get("repo_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.to_path_buf());
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("deepen-{}", id.replace('/', "-")));
+    let task = InvestigationTask {
+        task_id: task_id.clone(),
+        question: question.to_string(),
+        repo_path,
+        scope: InvestigationScope {
+            paths: string_array(arguments, "scope_paths"),
+            symbols: string_array(arguments, "scope_symbols"),
+        },
+        expected_outputs: string_array(arguments, "expected_outputs"),
+        budget: InvestigationBudget {
+            max_nodes: arguments
+                .get("max_nodes")
+                .and_then(Value::as_u64)
+                .unwrap_or(80) as usize,
+            max_depth: arguments
+                .get("max_depth")
+                .and_then(Value::as_u64)
+                .unwrap_or(4) as usize,
+            timeout_secs: arguments
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(120),
+        },
+    };
+
+    let mut agent = CodexCliAgent::new(
+        arguments
+            .get("codex_bin")
+            .and_then(Value::as_str)
+            .unwrap_or("codex"),
+    );
+    if let Some(model) = arguments.get("model").and_then(Value::as_str) {
+        agent = agent.with_model(model);
+    }
+    if let Some(codex_home) = arguments.get("codex_home").and_then(Value::as_str) {
+        agent = agent.with_codex_home(codex_home);
+    }
+
+    let result = agent.investigate(&task)?;
+    merge_investigation_result(&store, id, question, &result)?;
+
+    Ok(json!({
+        "status": "deepened",
+        "id": id,
+        "task_id": result.task_id,
+        "wiki_root": wiki_root,
+        "sources_appended": result.sources.len(),
+        "followups_appended": result.followups.len(),
+        "confidence": result.confidence
+    }))
+}
+
+fn wiki_apply_outline(repo: &Path, arguments: &Value) -> Result<Value> {
+    let outline_value = arguments
+        .get("outline")
+        .ok_or_else(|| anyhow::anyhow!("missing required object argument: outline"))?;
+    let outline: WikiOutline =
+        serde_json::from_value(outline_value.clone()).map_err(anyhow::Error::from)?;
+    let pages = outline.pages.len();
+    let tasks = outline
+        .pages
+        .iter()
+        .map(|page| page.deep_tasks.len())
+        .sum::<usize>();
+    let root = outline.root.clone();
+    let wiki_root = wiki_root(repo, arguments);
+    let store = WikiStore::open(&wiki_root)?;
+    store.apply_outline(outline)?;
+    Ok(json!({
+        "status": "outline_applied",
+        "wiki_root": wiki_root,
+        "root": root,
+        "pages": pages,
+        "tasks": tasks
+    }))
+}
+
+fn wiki_read_outline(repo: &Path, arguments: &Value) -> Result<Value> {
+    let wiki_root = wiki_root(repo, arguments);
+    let store = WikiStore::open(&wiki_root)?;
+    let outline = store.read_outline()?;
+    Ok(json!({
+        "status": "outline_read",
+        "wiki_root": wiki_root,
+        "outline": outline
+    }))
+}
+
+fn wiki_expand_tree(repo: &Path, arguments: &Value) -> Result<Value> {
+    let root_page_id = arguments
+        .get("root_page_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if root_page_id.trim().is_empty() {
+        anyhow::bail!("missing required string argument: root_page_id");
+    }
+    let task_limit = arguments
+        .get("task_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(3) as usize;
+    let parallelism = arguments
+        .get("parallelism")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let wiki_root = wiki_root(repo, arguments);
+    let store = WikiStore::open(&wiki_root)?;
+    let pending = store.pending_tasks(root_page_id, task_limit)?;
+    if pending.is_empty() {
+        return Ok(json!({
+            "status": "expanded",
+            "wiki_root": wiki_root,
+            "root_page_id": root_page_id,
+            "tasks_completed": 0,
+            "tasks_failed": 0,
+            "results": []
+        }));
+    }
+
+    let repo_path = arguments
+        .get("repo_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.to_path_buf());
+    let timeout_secs = arguments
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(120);
+    let tasks = pending
+        .iter()
+        .map(|(_, task)| InvestigationTask {
+            task_id: task.id.clone(),
+            question: task.question.clone(),
+            repo_path: repo_path.clone(),
+            scope: InvestigationScope {
+                paths: task.scope_paths.clone(),
+                symbols: task.scope_symbols.clone(),
+            },
+            expected_outputs: task.expected_outputs.clone(),
+            budget: InvestigationBudget {
+                max_nodes: arguments
+                    .get("max_nodes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(80) as usize,
+                max_depth: arguments
+                    .get("max_depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(4) as usize,
+                timeout_secs,
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut agent = CodexCliAgent::new(
+        arguments
+            .get("codex_bin")
+            .and_then(Value::as_str)
+            .unwrap_or("codex"),
+    );
+    if let Some(model) = arguments.get("model").and_then(Value::as_str) {
+        agent = agent.with_model(model);
+    }
+    if let Some(codex_home) = arguments.get("codex_home").and_then(Value::as_str) {
+        agent = agent.with_codex_home(codex_home);
+    }
+
+    for (page_id, task) in &pending {
+        store.update_task_status(page_id, &task.id, TaskStatus::Running, None, None)?;
+    }
+
+    let results = match investigate_many(agent, tasks, parallelism) {
+        Ok(results) => results,
+        Err(error) => {
+            let error_text = error.to_string();
+            for (page_id, task) in &pending {
+                store.update_task_status(
+                    page_id,
+                    &task.id,
+                    TaskStatus::Failed,
+                    None,
+                    Some(error_text.clone()),
+                )?;
+            }
+            return Ok(json!({
+                "status": "expanded",
+                "wiki_root": wiki_root,
+                "root_page_id": root_page_id,
+                "tasks_completed": 0,
+                "tasks_failed": pending.len(),
+                "error": error_text,
+                "results": []
+            }));
+        }
+    };
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut summaries = Vec::new();
+    for result in results {
+        let Some((page_id, task)) = pending.iter().find(|(_, task)| task.id == result.task_id)
+        else {
+            failed += 1;
+            summaries.push(json!({
+                "task_id": result.task_id,
+                "status": "failed",
+                "error": "result task id was not pending"
+            }));
+            continue;
+        };
+        match merge_investigation_result(&store, page_id, &task.question, &result) {
+            Ok(()) => {
+                store.update_task_status(
+                    page_id,
+                    &task.id,
+                    TaskStatus::Done,
+                    Some(result.confidence),
+                    None,
+                )?;
+                completed += 1;
+                summaries.push(json!({
+                    "task_id": result.task_id,
+                    "page_id": page_id,
+                    "status": "done",
+                    "sources_appended": result.sources.len(),
+                    "followups_appended": result.followups.len(),
+                    "confidence": result.confidence
+                }));
+            }
+            Err(error) => {
+                store.update_task_status(
+                    page_id,
+                    &task.id,
+                    TaskStatus::Failed,
+                    None,
+                    Some(error.to_string()),
+                )?;
+                failed += 1;
+                summaries.push(json!({
+                    "task_id": result.task_id,
+                    "page_id": page_id,
+                    "status": "failed",
+                    "error": error.to_string()
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "status": "expanded",
+        "wiki_root": wiki_root,
+        "root_page_id": root_page_id,
+        "tasks_completed": completed,
+        "tasks_failed": failed,
+        "results": summaries
+    }))
+}
+
+fn merge_investigation_result(
+    store: &WikiStore,
+    id: &str,
+    question: &str,
+    result: &InvestigationResult,
+) -> Result<()> {
+    let mut public_patch = String::new();
+    public_patch.push_str("\n\n## Atlas Investigation\n");
+    public_patch.push_str(&format!("Question: {question}\n\n"));
+    public_patch.push_str(result.summary_markdown.trim());
+    public_patch.push('\n');
+    if let Some(diagram) = &result.diagram {
+        public_patch.push('\n');
+        public_patch.push_str(&diagram_markdown(diagram));
+    }
+    store.patch_page(
+        id,
+        ContentFormat::Markdown,
+        &public_patch,
+        PatchMode::Append,
+    )?;
+
+    for source in &result.sources {
+        store.append_evidence(id, evidence_from_investigation_source(source))?;
+    }
+
+    if !result.followups.is_empty() {
+        let mut private_patch = String::from("Atlas Follow-ups\n");
+        for followup in &result.followups {
+            private_patch.push_str("- ");
+            private_patch.push_str(followup);
+            private_patch.push('\n');
+        }
+        store.patch_private_note(id, private_patch.trim_end(), PatchMode::Append)?;
+    }
+    Ok(())
+}
+
+fn diagram_markdown(diagram: &InvestigationDiagram) -> String {
+    match diagram.format.as_str() {
+        "svg" => format!("```svg\n{}\n```\n", diagram.content.trim()),
+        "mermaid" => format!("```mermaid\n{}\n```\n", diagram.content.trim()),
+        _ => String::new(),
+    }
+}
+
+fn evidence_from_investigation_source(source: &InvestigationSource) -> Evidence {
+    Evidence {
+        file: source.file.clone(),
+        start_line: source.start_line,
+        end_line: source.end_line,
+        note: source.note.clone(),
+    }
+}
+
 fn wiki_root(repo: &Path, arguments: &Value) -> PathBuf {
     arguments
         .get("wiki_root")
@@ -424,6 +783,21 @@ fn required_str<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("missing required string argument: {key}"))
+}
+
+fn string_array(arguments: &Value, key: &str) -> Vec<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_page_kind(value: &str) -> Result<PageKind> {
@@ -803,8 +1177,310 @@ mod tests {
         assert!(!html.contains("executor creation entry</p>"));
     }
 
+    #[test]
+    fn wiki_tools_are_disabled_inside_atlas_child_agent() {
+        assert!(wiki_tool_is_disabled_inside_atlas_child_agent(
+            "wiki_read_page",
+            true,
+            true
+        ));
+        assert!(!wiki_tool_is_disabled_inside_atlas_child_agent(
+            "wiki_read_page",
+            true,
+            false
+        ));
+        assert!(!wiki_tool_is_disabled_inside_atlas_child_agent(
+            "rank_context",
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn wiki_deepen_page_runs_atlas_child_and_merges_result() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wiki_root = temp.path().join(".gitnova/wiki");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let codex_bin = temp.path().join("fake-codex");
+        std::fs::write(
+            &codex_bin,
+            r#"#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ] || [ "$prev" = "--output-last-message" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+cat > /dev/null
+cat > "$out" <<'JSON'
+{"task_id":"trace-query-executor-creator","summary_markdown":"QueryExecutorCreator builds executor families from query semantics.","sources":[{"file":"aios/ha3/search/query_executor/QueryExecutorCreator.cpp","start_line":10,"end_line":42,"note":"creator dispatch"}],"diagram":{"format":"svg","content":"<svg viewBox=\"0 0 100 40\"><text x=\"4\" y=\"20\">Creator</text></svg>"},"followups":["Trace bitmap executor index reader dependencies."],"confidence":0.82}
+JSON
+"#,
+        )
+        .unwrap();
+        make_executable(&codex_bin);
+
+        let mut repo_state = repo.clone();
+        call_tool(
+            "wiki_upsert_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "id": "ha3/search/query-executors",
+                "title": "Query Executors",
+                "kind": "article",
+                "content": "Executor Families\nInitial skeleton."
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+
+        let deepened = call_tool(
+            "wiki_deepen_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "repo_path": repo,
+                "id": "ha3/search/query-executors",
+                "task_id": "trace-query-executor-creator",
+                "question": "Trace QueryExecutorCreator into each executor family.",
+                "scope_paths": ["aios/ha3/search"],
+                "scope_symbols": ["QueryExecutorCreator"],
+                "expected_outputs": ["summary", "sources", "diagram", "followups"],
+                "codex_bin": codex_bin,
+                "timeout_secs": 5
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let deepened = unwrap_tool_payload(deepened);
+        assert_eq!(deepened["status"], "deepened");
+        assert_eq!(deepened["task_id"], "trace-query-executor-creator");
+        assert_eq!(deepened["sources_appended"], 1);
+        assert_eq!(deepened["followups_appended"], 1);
+
+        let html = std::fs::read_to_string(
+            temp.path()
+                .join(".gitnova/wiki/pages/ha3/search/query-executors.html"),
+        )
+        .unwrap();
+        assert!(html.contains("QueryExecutorCreator builds executor families"));
+        assert!(html.contains("<svg viewBox"));
+        assert!(html.contains("data-gitnova-evidence"));
+        assert!(!html.contains("Trace bitmap executor index reader dependencies.</p>"));
+
+        let private_read = call_tool(
+            "wiki_read_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "id": "ha3/search/query-executors",
+                "include_private": true
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let private_read = unwrap_tool_payload(private_read);
+        assert!(private_read["private_note"]
+            .as_str()
+            .unwrap()
+            .contains("Trace bitmap executor index reader dependencies."));
+    }
+
+    #[test]
+    fn wiki_apply_outline_writes_pages_and_task_queue() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wiki_root = temp.path().join(".gitnova/wiki");
+        let mut repo_state = temp.path().to_path_buf();
+
+        let applied = call_tool(
+            "wiki_apply_outline",
+            &json!({
+                "wiki_root": wiki_root,
+                "outline": {
+                    "root": "ha3",
+                    "pages": [
+                        {
+                            "id": "ha3",
+                            "title": "HA3",
+                            "kind": "index",
+                            "summary": "Search layer overview.",
+                            "purpose": "Give readers the top-level HA3 map.",
+                            "content": "## Reading Path\nStart with search runtime.",
+                            "deep_tasks": []
+                        },
+                        {
+                            "id": "ha3/search/query-executors",
+                            "title": "Query Executors",
+                            "kind": "article",
+                            "parent": "ha3",
+                            "summary": "Executor families and dispatch.",
+                            "purpose": "Explain executor creation and index reader usage.",
+                            "deep_tasks": [{
+                                "id": "trace-query-executor-creator",
+                                "question": "Trace QueryExecutorCreator into each executor family.",
+                                "scope_paths": ["aios/ha3/search"],
+                                "scope_symbols": ["QueryExecutorCreator"],
+                                "expected_outputs": ["summary", "sources", "diagram"]
+                            }]
+                        }
+                    ]
+                }
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let applied = unwrap_tool_payload(applied);
+        assert_eq!(applied["status"], "outline_applied");
+        assert_eq!(applied["pages"], 2);
+        assert_eq!(applied["tasks"], 1);
+
+        let outline = call_tool(
+            "wiki_read_outline",
+            &json!({
+                "wiki_root": wiki_root
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let outline = unwrap_tool_payload(outline);
+        assert_eq!(outline["outline"]["root"], "ha3");
+        assert_eq!(
+            outline["outline"]["pages"][1]["deep_tasks"][0]["status"],
+            "pending"
+        );
+
+        let html = std::fs::read_to_string(temp.path().join(".gitnova/wiki/pages/ha3/index.html"))
+            .unwrap();
+        assert!(html.contains("Reading Path"));
+
+        let private_read = call_tool(
+            "wiki_read_page",
+            &json!({
+                "wiki_root": wiki_root,
+                "id": "ha3/search/query-executors",
+                "include_private": true
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let private_read = unwrap_tool_payload(private_read);
+        assert!(private_read["private_note"]
+            .as_str()
+            .unwrap()
+            .contains("Trace QueryExecutorCreator"));
+    }
+
+    #[test]
+    fn wiki_expand_tree_runs_pending_outline_tasks_and_marks_done() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let wiki_root = temp.path().join(".gitnova/wiki");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let codex_bin = temp.path().join("fake-codex");
+        std::fs::write(
+            &codex_bin,
+            r#"#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ] || [ "$prev" = "--output-last-message" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+stdin="$(cat)"
+task_id="$(printf '%s\n' "$stdin" | awk -F': ' '/^task_id:/{print $2; exit}')"
+printf '{"task_id":"%s","summary_markdown":"summary for %s","sources":[{"file":"src/lib.rs","start_line":1,"end_line":2,"note":"test source"}],"diagram":null,"followups":["follow %s"],"confidence":0.77}\n' "$task_id" "$task_id" "$task_id" > "$out"
+"#,
+        )
+        .unwrap();
+        make_executable(&codex_bin);
+
+        let mut repo_state = repo.clone();
+        call_tool(
+            "wiki_apply_outline",
+            &json!({
+                "wiki_root": wiki_root,
+                "outline": {
+                    "root": "ha3",
+                    "pages": [{
+                        "id": "ha3/search/query-executors",
+                        "title": "Query Executors",
+                        "kind": "article",
+                        "summary": "Executor families and dispatch.",
+                        "deep_tasks": [
+                            {"id": "task-a", "question": "Investigate A.", "expected_outputs": ["summary"]},
+                            {"id": "task-b", "question": "Investigate B.", "expected_outputs": ["summary"]}
+                        ]
+                    }]
+                }
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+
+        let expanded = call_tool(
+            "wiki_expand_tree",
+            &json!({
+                "wiki_root": wiki_root,
+                "repo_path": repo,
+                "root_page_id": "ha3",
+                "task_limit": 2,
+                "parallelism": 2,
+                "codex_bin": codex_bin,
+                "timeout_secs": 5
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let expanded = unwrap_tool_payload(expanded);
+        assert_eq!(expanded["status"], "expanded");
+        assert_eq!(expanded["tasks_completed"], 2);
+        assert_eq!(expanded["tasks_failed"], 0);
+
+        let outline = call_tool(
+            "wiki_read_outline",
+            &json!({
+                "wiki_root": wiki_root
+            }),
+            &mut repo_state,
+        )
+        .unwrap();
+        let outline = unwrap_tool_payload(outline);
+        assert_eq!(
+            outline["outline"]["pages"][0]["deep_tasks"][0]["status"],
+            "done"
+        );
+        assert_eq!(
+            outline["outline"]["pages"][0]["deep_tasks"][1]["status"],
+            "done"
+        );
+
+        let html = std::fs::read_to_string(
+            temp.path()
+                .join(".gitnova/wiki/pages/ha3/search/query-executors.html"),
+        )
+        .unwrap();
+        assert!(html.contains("summary for task-a"));
+        assert!(html.contains("summary for task-b"));
+    }
+
     fn unwrap_tool_payload(value: Value) -> Value {
         let text = value["content"][0]["text"].as_str().expect("tool text");
         serde_json::from_str(text).expect("inner payload")
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 }

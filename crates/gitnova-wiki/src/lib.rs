@@ -4,4 +4,7 @@ mod store;
 mod types;
 
 pub use store::WikiStore;
-pub use types::{ContentFormat, Evidence, PageKind, PatchMode, WikiPage, WikiSchema};
+pub use types::{
+    ContentFormat, DeepTask, Evidence, OutlinePage, PageKind, PatchMode, TaskStatus, WikiOutline,
+    WikiPage, WikiSchema,
+};

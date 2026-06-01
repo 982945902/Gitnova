@@ -75,6 +75,22 @@ const TOOL_DEFINITIONS: &[(&str, &str)] = &[
         "wiki_read_page",
         "Read a Gitnova wiki page and optional private note",
     ),
+    (
+        "wiki_deepen_page",
+        "Run an Atlas child Codex investigation and merge the result into a wiki page",
+    ),
+    (
+        "wiki_apply_outline",
+        "Apply a Codex-authored wiki outline and deep task queue",
+    ),
+    (
+        "wiki_read_outline",
+        "Read the current Codex-authored wiki outline",
+    ),
+    (
+        "wiki_expand_tree",
+        "Run pending outline tasks with parallel Atlas child Codex agents",
+    ),
 ];
 
 const RESOURCE_DEFINITIONS: &[(&str, &str)] = &[

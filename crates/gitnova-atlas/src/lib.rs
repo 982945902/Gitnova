@@ -2,6 +2,13 @@ use gitnova_core::model::{CodeGraph, Edge, EdgeKind, Node, NodeKind, Span};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+mod code_agent;
+
+pub use code_agent::{
+    investigate_many, CodexCliAgent, InvestigationBudget, InvestigationDiagram,
+    InvestigationResult, InvestigationScope, InvestigationSource, InvestigationTask,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtlasOptions {
     pub entry: Option<String>,

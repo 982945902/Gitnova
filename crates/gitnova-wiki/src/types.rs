@@ -20,6 +20,23 @@ pub enum PatchMode {
     Append,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
+fn default_task_status() -> TaskStatus {
+    TaskStatus::Pending
+}
+
+fn default_outline_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Evidence {
     pub file: String,
@@ -60,6 +77,61 @@ pub struct WikiPage {
     pub content_format: ContentFormat,
     pub content: String,
     pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeepTask {
+    pub id: String,
+    pub question: String,
+    #[serde(default)]
+    pub scope_paths: Vec<String>,
+    #[serde(default)]
+    pub scope_symbols: Vec<String>,
+    #[serde(default)]
+    pub expected_outputs: Vec<String>,
+    #[serde(default = "default_task_status")]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutlinePage {
+    pub id: String,
+    pub title: String,
+    pub kind: PageKind,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub deep_tasks: Vec<DeepTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WikiOutline {
+    #[serde(default = "default_outline_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub pages: Vec<OutlinePage>,
+}
+
+impl Default for WikiOutline {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            root: String::new(),
+            pages: Vec::new(),
+        }
+    }
 }
 
 impl WikiPage {

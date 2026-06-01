@@ -180,6 +180,65 @@ fn markdown_svg_fences_render_as_inline_diagrams() -> anyhow::Result<()> {
 }
 
 #[test]
+fn markdown_mermaid_fences_render_as_diagrams_without_leaking_fence_markers() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "## Atlas Investigation\n\n```mermaid\nflowchart TD\n    A[QueryExecutorCreator] --> B[TermQueryExecutor]\n```\n\nAfter the diagram.",
+        PatchMode::Replace,
+    )?;
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"));
+    assert!(html.contains("<div class=\"diagram-block\" data-diagram-format=\"mermaid\">"));
+    assert!(html.contains("<pre class=\"mermaid\">"));
+    assert!(html.contains("flowchart TD"));
+    assert!(html.contains("A[QueryExecutorCreator] --&gt; B[TermQueryExecutor]"));
+    assert!(html.contains("<p>After the diagram.</p>"));
+    assert!(!html.contains("<p>```mermaid</p>"));
+    assert!(!html.contains("<p>```</p>"));
+
+    Ok(())
+}
+
+#[test]
+fn markdown_renders_lists_inline_code_and_wrapped_paragraphs() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "This line starts a paragraph\nthat continues on the next line.\n\n- Term queries call `createTermQueryExecutor`.\n- OR queries create `OrQueryExecutor`.\n\nFactory helpers use **bitmap-aware** variants.",
+        PatchMode::Replace,
+    )?;
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("<p>This line starts a paragraph\nthat continues on the next line.</p>"));
+    assert!(html.contains("<ul>"));
+    assert!(html.contains("<li>Term queries call <code>createTermQueryExecutor</code>.</li>"));
+    assert!(html.contains("<li>OR queries create <code>OrQueryExecutor</code>.</li>"));
+    assert!(html.contains("<strong>bitmap-aware</strong>"));
+    assert!(!html.contains("<p>- Term queries"));
+
+    Ok(())
+}
+
+#[test]
 fn public_content_is_rendered_without_heading_heuristics() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let store = WikiStore::open(temp.path())?;
