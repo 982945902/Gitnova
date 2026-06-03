@@ -170,7 +170,7 @@ fn extract_syntax_symbols(parsed: &ParsedFile) -> Option<Vec<ExtractedSymbol>> {
         }
 
         // Determine NodeKind
-        let mut kind = match def_capture_name {
+        let kind = match def_capture_name {
             Some("def.class") | Some("def.class_fallback") => NodeKind::Class,
             Some("def.struct") | Some("def.struct_fallback") => NodeKind::Struct,
             Some("def.enum") => NodeKind::Enum,
@@ -328,33 +328,29 @@ fn build_qualified_from_enclosing(
     let mut cur = node;
 
     // Walk up parent chain collecting namespace and class names
-    loop {
-        if let Some(parent) = cur.parent() {
-            match parent.kind() {
-                "namespace_definition" => {
-                    if let Some(ns) = child_name(parent, source) {
-                        parts.push(ns);
-                    }
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "namespace_definition" => {
+                if let Some(ns) = child_name(parent, source) {
+                    parts.push(ns);
                 }
-                "class_specifier" | "struct_specifier" => {
-                    if let Some(cls) = child_name(parent, source) {
-                        // Don't add the current node's own class name if
-                        // the node itself IS the class/struct specifier
-                        if node.kind() != "class_specifier" && node.kind() != "struct_specifier" {
-                            parts.push(cls);
-                        }
-                    }
-                }
-                "template_declaration" => {
-                    // Pass-through: class/struct may be inside template
-                }
-                "translation_unit" => break,
-                _ => {}
             }
-            cur = parent;
-        } else {
-            break;
+            "class_specifier" | "struct_specifier" => {
+                if let Some(cls) = child_name(parent, source) {
+                    // Don't add the current node's own class name if
+                    // the node itself IS the class/struct specifier
+                    if node.kind() != "class_specifier" && node.kind() != "struct_specifier" {
+                        parts.push(cls);
+                    }
+                }
+            }
+            "template_declaration" => {
+                // Pass-through: class/struct may be inside template
+            }
+            "translation_unit" => break,
+            _ => {}
         }
+        cur = parent;
     }
 
     parts.reverse();

@@ -58,30 +58,17 @@ const TOOL_DEFINITIONS: &[(&str, &str)] = &[
         "Rank context from git diff metadata and hunks",
     ),
     ("search_embeddings", "Search persisted embeddings"),
-    ("wiki_upsert_page", "Create or update a Gitnova wiki page"),
     (
-        "wiki_patch_page",
-        "Patch public Gitnova wiki page content and render HTML",
+        "wiki_plan_repo",
+        "Create a repo-level Gitnova wiki outline and deep task queue",
     ),
     (
-        "wiki_patch_private_note",
-        "Patch private agent-only notes for a Gitnova wiki page",
-    ),
-    (
-        "wiki_append_evidence",
-        "Append machine-readable evidence to a Gitnova wiki page",
+        "wiki_run_repo",
+        "Score a repo wiki and expand the lowest-completion pages",
     ),
     (
         "wiki_read_page",
         "Read a Gitnova wiki page and optional private note",
-    ),
-    (
-        "wiki_deepen_page",
-        "Run an Atlas child Codex investigation and merge the result into a wiki page",
-    ),
-    (
-        "wiki_apply_outline",
-        "Apply a Codex-authored wiki outline and deep task queue",
     ),
     (
         "wiki_read_outline",

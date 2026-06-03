@@ -89,6 +89,12 @@ pub struct DeepTask {
     pub scope_symbols: Vec<String>,
     #[serde(default)]
     pub expected_outputs: Vec<String>,
+    #[serde(default)]
+    pub max_nodes: Option<usize>,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default = "default_task_status")]
     pub status: TaskStatus,
     #[serde(default)]

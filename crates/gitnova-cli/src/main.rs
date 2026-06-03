@@ -1,11 +1,13 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use gitnova_core::{build_graph_from_entries, model::current_unix, query, scan_repository};
+use gitnova_core::{
+    build_graph_from_entries, model::current_unix, query, scan::SourceFile, scan_repository,
+};
 use gitnova_enrich::embeddings::{self, MODEL2VEC_PROVIDER};
 use gitnova_enrich::git::apply_git_churn;
 use gitnova_enrich::lsp::apply_lsp_metadata;
 use gitnova_rank::{diff, rank_graph_with_fts};
-use gitnova_storage::{FileManifestEntry, GitnovaStore};
+use gitnova_storage::{json_export, FileManifestEntry, GitnovaStore};
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::json;
@@ -275,7 +277,7 @@ async fn main() -> Result<()> {
                     .collect();
                 let _ = gitnova_storage::json_export::export_embeddings(
                     &emb_map,
-                    &build.repo.join(".gitnova/embeddings.json"),
+                    build.repo.join(".gitnova/embeddings.json"),
                 );
                 // Try SurrealDB (best-effort, may fail in nested runtime)
                 if let Ok(store) = GitnovaStore::open(&build.repo) {
@@ -322,7 +324,7 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     // Fallback: load embeddings from JSON file
                     gitnova_storage::json_export::import_embeddings(
-                        &args.repo.join(".gitnova/embeddings.json"),
+                        args.repo.join(".gitnova/embeddings.json"),
                     )
                     .unwrap_or_default()
                 }
@@ -380,7 +382,7 @@ async fn main() -> Result<()> {
                     .load_embeddings(MODEL2VEC_PROVIDER)
                     .unwrap_or_default(),
                 Err(_) => gitnova_storage::json_export::import_embeddings(
-                    &args.repo.join(".gitnova/embeddings.json"),
+                    args.repo.join(".gitnova/embeddings.json"),
                 )
                 .unwrap_or_default(),
             };
@@ -429,15 +431,17 @@ fn index_repo(repo: &Path, _force: bool) -> Result<IndexReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
+    let manifest = manifest_from_files(&files);
 
     // Always export index.json as reliable backup
-    gitnova_storage::json_export::export_graph(&graph, &repo.join(".gitnova/index.json"))?;
+    json_export::export_graph(&graph, repo.join(".gitnova/index.json"))?;
+    json_export::export_manifest(&manifest, repo.join(".gitnova/manifest.json"))?;
 
     // Try SurrealDB persistence (best-effort, non-fatal in nested runtime contexts)
     if let Ok(store) = GitnovaStore::open(repo) {
         let _ = store.save_graph(&graph);
         let _ = store.export_json(&graph);
-        let _ = save_manifest_from_files(&store, files);
+        let _ = store.save_manifest(&manifest);
     }
 
     Ok(IndexReport {
@@ -452,7 +456,7 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let old = store
         .as_ref()
         .map(|s| s.load_manifest().unwrap_or_default())
-        .unwrap_or_default();
+        .unwrap_or_else(|_| manifest_from_file(repo));
     let current_paths: HashSet<_> = files
         .iter()
         .map(|file| file.relative_path.clone())
@@ -473,11 +477,13 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     let mut graph = build_graph_from_entries(repo, &files)?;
     apply_git_churn(repo, &mut graph)?;
     apply_lsp_metadata(&mut graph);
-    gitnova_storage::json_export::export_graph(&graph, &repo.join(".gitnova/index.json"))?;
+    let manifest = manifest_from_files(&files);
+    json_export::export_graph(&graph, repo.join(".gitnova/index.json"))?;
+    json_export::export_manifest(&manifest, repo.join(".gitnova/manifest.json"))?;
     if let Ok(ref s) = store {
         let _ = s.save_graph(&graph);
         let _ = s.export_json(&graph);
-        let _ = save_manifest_from_files(s, files);
+        let _ = s.save_manifest(&manifest);
     }
     Ok(UpdateReport {
         status: "updated",
@@ -488,21 +494,25 @@ fn update_repo(repo: &Path) -> Result<UpdateReport> {
     })
 }
 
-fn save_manifest_from_files(
-    store: &GitnovaStore,
-    files: Vec<gitnova_core::scan::SourceFile>,
-) -> Result<()> {
+fn manifest_from_files(files: &[SourceFile]) -> Vec<FileManifestEntry> {
     let now = current_unix();
-    let manifest = files
-        .into_iter()
+    files
+        .iter()
         .map(|file| FileManifestEntry {
-            path: file.relative_path,
-            content_hash: file.content_hash,
+            path: file.relative_path.clone(),
+            content_hash: file.content_hash.clone(),
             language: file.language,
             indexed_at_unix: now,
         })
-        .collect::<Vec<_>>();
-    store.save_manifest(&manifest)
+        .collect()
+}
+
+fn manifest_from_file(repo: &Path) -> HashMap<String, FileManifestEntry> {
+    json_export::import_manifest(repo.join(".gitnova/manifest.json"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.path.clone(), e))
+        .collect()
 }
 
 fn watch_repo(repo: &Path) -> Result<()> {
@@ -531,7 +541,7 @@ fn load_graph_with_fallback(repo: &Path) -> Result<gitnova_core::CodeGraph> {
         }
     }
     // Fallback: load from index.json
-    gitnova_storage::json_export::import_graph(&repo.join(".gitnova/index.json"))
+    gitnova_storage::json_export::import_graph(repo.join(".gitnova/index.json"))
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {

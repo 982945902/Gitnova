@@ -39,12 +39,15 @@ impl SurrealStore {
     pub fn json_path(&self) -> PathBuf {
         self.repo_root.join(".gitnova/index.json")
     }
+    pub fn manifest_path(&self) -> PathBuf {
+        self.repo_root.join(".gitnova/manifest.json")
+    }
 
     // ── Graph persistence ──
 
     pub fn save_graph(&self, graph: &CodeGraph) -> Result<()> {
         // Always export index.json as reliable backup
-        json_export::export_graph(graph, &self.json_path())?;
+        json_export::export_graph(graph, self.json_path())?;
 
         // Write full graph as single JSON blob to SurrealDB (fast, atomic)
         let graph_json = serde_json::to_string(graph)?;
@@ -109,12 +112,12 @@ impl SurrealStore {
 
         // Fallback: load from index.json
         drop(rt);
-        json_export::import_graph(&self.json_path())
+        json_export::import_graph(self.json_path())
             .context("No graph data in SurrealDB or index.json")
     }
 
     pub fn export_json(&self, graph: &CodeGraph) -> Result<()> {
-        json_export::export_graph(graph, &self.json_path())
+        json_export::export_graph(graph, self.json_path())
     }
 
     // ── FTS search ──
@@ -148,6 +151,7 @@ impl SurrealStore {
     // ── File manifest ──
 
     pub fn save_manifest(&self, entries: &[FileManifestEntry]) -> Result<()> {
+        json_export::export_manifest(entries, self.manifest_path())?;
         let entries_json = serde_json::to_string(entries)?;
         let escaped = entries_json.replace('\\', "\\\\").replace('\'', "\\'");
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -191,6 +195,13 @@ impl SurrealStore {
             HashMap::new()
         });
         std::mem::forget(rt);
+        if map.is_empty() {
+            return Ok(json_export::import_manifest(self.manifest_path())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| (e.path.clone(), e))
+                .collect());
+        }
         Ok(map)
     }
 

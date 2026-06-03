@@ -64,7 +64,7 @@ impl TransformerLayer {
     fn new(hidden_dim: usize, num_heads: usize, ff_dim: usize, vb: VarBuilder) -> Result<Self> {
         let head_dim = hidden_dim / num_heads;
         assert!(
-            hidden_dim % num_heads == 0,
+            hidden_dim.is_multiple_of(num_heads),
             "hidden_dim must be divisible by num_heads"
         );
         Ok(Self {

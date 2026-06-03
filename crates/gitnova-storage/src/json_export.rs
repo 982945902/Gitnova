@@ -1,3 +1,4 @@
+use crate::FileManifestEntry;
 use anyhow::Result;
 use gitnova_core::CodeGraph;
 use std::collections::HashMap;
@@ -13,6 +14,19 @@ pub fn export_graph(graph: &CodeGraph, path: impl AsRef<Path>) -> Result<()> {
 }
 
 pub fn import_graph(path: impl AsRef<Path>) -> Result<CodeGraph> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn export_manifest(entries: &[FileManifestEntry], path: impl AsRef<Path>) -> Result<()> {
+    if let Some(parent) = path.as_ref().parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(entries)?)?;
+    Ok(())
+}
+
+pub fn import_manifest(path: impl AsRef<Path>) -> Result<Vec<FileManifestEntry>> {
     let bytes = fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
 }

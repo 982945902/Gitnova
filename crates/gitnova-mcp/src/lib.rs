@@ -19,9 +19,12 @@ mod tests {
         let tools = server.tool_names();
         assert!(tools.contains(&"index_project".to_string()));
         assert!(tools.contains(&"watch_status".to_string()));
-        assert!(tools.contains(&"wiki_upsert_page".to_string()));
-        assert!(tools.contains(&"wiki_patch_private_note".to_string()));
-        assert!(tools.contains(&"wiki_apply_outline".to_string()));
+        assert!(tools.contains(&"wiki_plan_repo".to_string()));
+        assert!(tools.contains(&"wiki_run_repo".to_string()));
+        assert!(tools.contains(&"wiki_read_outline".to_string()));
         assert!(tools.contains(&"wiki_expand_tree".to_string()));
+        assert!(!tools.contains(&"wiki_upsert_page".to_string()));
+        assert!(!tools.contains(&"wiki_patch_private_note".to_string()));
+        assert!(!tools.contains(&"wiki_apply_outline".to_string()));
     }
 }

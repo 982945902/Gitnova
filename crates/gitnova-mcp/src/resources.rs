@@ -26,7 +26,7 @@ fn resource(uri: &str, name: &str) -> Value {
 
 pub fn read_resource(repo: impl AsRef<Path>, uri: &str) -> Result<Value> {
     let repo = repo.as_ref();
-    let graph = crate::tools::with_store(repo, |store| store.load_graph())?;
+    let graph = crate::tools::load_graph(repo)?;
     let value = match uri {
         "gitnova://graph/summary" => json!(query::summarize(&graph)),
         "gitnova://graph/nodes" => json!(graph.nodes),

@@ -71,6 +71,12 @@ pub struct CodexCliAgent {
     codex_home: Option<PathBuf>,
 }
 
+#[derive(Debug)]
+pub enum InvestigationOutcome {
+    Done(InvestigationResult),
+    Failed { task_id: String, error: String },
+}
+
 impl CodexCliAgent {
     pub fn new(codex_bin: impl AsRef<Path>) -> Self {
         Self {
@@ -183,28 +189,53 @@ pub fn investigate_many(
     tasks: Vec<InvestigationTask>,
     parallelism: usize,
 ) -> Result<Vec<InvestigationResult>> {
+    let mut results = Vec::new();
+    for outcome in investigate_many_outcomes(agent, tasks, parallelism) {
+        match outcome {
+            InvestigationOutcome::Done(result) => results.push(result),
+            InvestigationOutcome::Failed { task_id, error } => {
+                return Err(anyhow!("{task_id}: {error}"));
+            }
+        }
+    }
+    Ok(results)
+}
+
+pub fn investigate_many_outcomes(
+    agent: CodexCliAgent,
+    tasks: Vec<InvestigationTask>,
+    parallelism: usize,
+) -> Vec<InvestigationOutcome> {
     if tasks.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let parallelism = parallelism.max(1);
     let mut results = Vec::with_capacity(tasks.len());
     for chunk in tasks.chunks(parallelism) {
         let handles = chunk
             .iter()
-            .cloned()
             .map(|task| {
+                let task = task.clone();
+                let task_id = task.task_id.clone();
                 let agent = agent.clone();
-                thread::spawn(move || agent.investigate(&task))
+                (task_id, thread::spawn(move || agent.investigate(&task)))
             })
             .collect::<Vec<_>>();
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| anyhow!("atlas child investigation thread panicked"))??;
-            results.push(result);
+        for (task_id, handle) in handles {
+            match handle.join() {
+                Ok(Ok(result)) => results.push(InvestigationOutcome::Done(result)),
+                Ok(Err(error)) => results.push(InvestigationOutcome::Failed {
+                    task_id,
+                    error: error.to_string(),
+                }),
+                Err(_) => results.push(InvestigationOutcome::Failed {
+                    task_id,
+                    error: "atlas child investigation thread panicked".to_string(),
+                }),
+            }
         }
     }
-    Ok(results)
+    results
 }
 
 fn render_prompt(task: &InvestigationTask) -> Result<String> {
@@ -241,6 +272,23 @@ Rules:
 - Prefer the preloaded source context when it is sufficient; use shell read/search commands only for missing details.
 - Use shell read/search commands as needed.
 - Every important claim should have source spans when possible.
+
+Wiki writing style:
+- Write for a code wiki, not a chat answer or an investigation report.
+- Use a short opening paragraph of 2-4 sentences.
+- Prefer compact sections with headings such as "Main Dispatch", "Factory Helpers", "State / Ownership", or names that fit the task.
+- Use bullet lists for grouped behavior; avoid long paragraph walls.
+- Each important bullet or claim should end with an inline citation marker like {{{{source:n}}}}, where n is the 1-based index in the sources array you return.
+- Do not write "this investigation", "the agent found", "question:", or other process commentary in public content.
+- If a claim is not directly supported by a source span, either omit it or put it in followups.
+
+Diagram style:
+- Include a diagram when it clarifies control flow, ownership, lifecycle, or module relationships.
+- Prefer Mermaid flowcharts for process/dispatch diagrams; use SVG only when precise layout or custom visual grouping matters.
+- Keep diagrams small enough to read in a wiki page, roughly 6-14 nodes.
+- In Mermaid diagrams, quote node labels that contain punctuation, parentheses, slashes, underscores, or symbols, for example: A["Query accept(visitor)"].
+- Use descriptive labels, not code-only node names, unless the code symbol itself is the point.
+- Put the diagram only in the top-level diagram field. Do not include Mermaid fences, SVG fences, or a Flow/Diagram section inside summary_markdown.
 - Return only JSON matching the provided schema.
 "#,
         task_id = task.task_id,

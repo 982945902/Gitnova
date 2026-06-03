@@ -421,7 +421,7 @@ fn bpr_loss(
 ) -> candle_core::Result<Tensor> {
     let n = scores.dims()[0];
     if positive_indices.is_empty() || n < 2 {
-        return Ok(Tensor::zeros((1,), DType::F32, device)?);
+        return Tensor::zeros((1,), DType::F32, device);
     }
     let mut rng = thread_rng();
     let mut total = Tensor::zeros((1,), DType::F32, device)?;
@@ -458,17 +458,11 @@ fn build_feature_tensor(
         let nid = &graph.nodes[gi].id;
         match node_embeddings.get(nid) {
             Some(emb) => {
-                for &v in emb.iter().take(dim) {
-                    data.push(v);
-                }
-                for _ in emb.len()..dim {
-                    data.push(0.0);
-                }
+                data.extend(emb.iter().take(dim).copied());
+                data.extend(std::iter::repeat_n(0.0, dim.saturating_sub(emb.len())));
             }
             None => {
-                for _ in 0..dim {
-                    data.push(0.0);
-                }
+                data.extend(std::iter::repeat_n(0.0, dim));
             }
         }
     }

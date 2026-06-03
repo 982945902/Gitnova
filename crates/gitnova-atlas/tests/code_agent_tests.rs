@@ -86,6 +86,18 @@ JSON
     assert!(stdin.contains("Return only JSON"));
     assert!(stdin.contains("Do not edit files"));
     assert!(stdin.contains("Do not call Gitnova MCP tools"));
+    assert!(stdin.contains("Write for a code wiki"));
+    assert!(stdin.contains("Use bullet lists for grouped behavior"));
+    assert!(stdin.contains("avoid long paragraph walls"));
+    assert!(stdin.contains("{{source:n}}"));
+    assert!(stdin.contains("Do not write \"this investigation\""));
+    assert!(stdin.contains("Prefer Mermaid flowcharts"));
+    assert!(stdin.contains("SVG only when precise layout"));
+    assert!(stdin.contains("roughly 6-14 nodes"));
+    assert!(stdin.contains("quote node labels"));
+    assert!(stdin.contains("diagram only in the top-level diagram field"));
+    assert!(stdin.contains("Do not include Mermaid fences"));
+    assert!(stdin.contains("inside summary_markdown"));
 
     let env = fs::read_to_string(capture_dir.join("env.txt")).unwrap();
     assert!(env.contains("GITNOVA_ATLAS_CHILD=1"));

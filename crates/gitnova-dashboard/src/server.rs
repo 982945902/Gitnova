@@ -232,7 +232,7 @@ fn load_dashboard_graph(state: &DashboardState) -> Result<gitnova_core::CodeGrap
     SurrealStore::open(state.repo_root.as_ref())
         .and_then(|store| store.load_graph())
         .or_else(|_| {
-            gitnova_storage::json_export::import_graph(&state.repo_root.join(".gitnova/index.json"))
+            gitnova_storage::json_export::import_graph(state.repo_root.join(".gitnova/index.json"))
         })
 }
 

@@ -1,4 +1,7 @@
-use gitnova_wiki::{ContentFormat, Evidence, PageKind, PatchMode, WikiPage, WikiStore};
+use gitnova_wiki::{
+    ContentFormat, DeepTask, Evidence, OutlinePage, PageKind, PatchMode, TaskStatus, WikiOutline,
+    WikiPage, WikiStore,
+};
 
 #[test]
 fn upsert_page_builds_nested_html_index_tree() -> anyhow::Result<()> {
@@ -138,7 +141,7 @@ fn evidence_renders_as_public_source_spans() -> anyhow::Result<()> {
     assert!(html.contains("<aside class=\"source-spans\""));
     assert!(html.contains("<h2>Source Spans</h2>"));
     assert!(html.contains(
-        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124\""
+        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124-L217\""
     ));
     assert!(html.contains("aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp:124-217"));
     assert!(html.contains("Term executor factory and posting-type dispatch."));
@@ -151,6 +154,7 @@ fn evidence_renders_as_public_source_spans() -> anyhow::Result<()> {
         .contains("<h1>aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp</h1>"));
     assert!(source_html.contains("id=\"L124\""));
     assert!(source_html.contains("source line 124"));
+    assert!(source_html.contains("highlightHashSpan"));
 
     Ok(())
 }
@@ -195,7 +199,7 @@ fn source_markers_render_inline_citations_instead_of_bottom_list() -> anyhow::Re
     assert!(html.contains("class=\"source-cite\""));
     assert!(html.contains(">Term queries call <code>createTermQueryExecutor</code>. <a"));
     assert!(html.contains(
-        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124\""
+        "href=\"../../_sources/aios/ha3/ha3/search/query_executor/QueryExecutorCreator.cpp.html#L124-L217\""
     ));
     assert!(html.contains("[1]</a>"));
     assert!(!html.contains("<aside class=\"source-spans\""));
@@ -308,10 +312,38 @@ fn markdown_mermaid_fences_render_as_diagrams_without_leaking_fence_markers() ->
     assert!(html.contains("<div class=\"diagram-block\" data-diagram-format=\"mermaid\">"));
     assert!(html.contains("<pre class=\"mermaid\">"));
     assert!(html.contains("flowchart TD"));
-    assert!(html.contains("A[QueryExecutorCreator] --&gt; B[TermQueryExecutor]"));
+    assert!(html
+        .contains("A[&quot;QueryExecutorCreator&quot;] --&gt; B[&quot;TermQueryExecutor&quot;]"));
+    assert!(html.contains("A[&quot;QueryExecutorCreator&quot;]"));
     assert!(html.contains("<p>After the diagram.</p>"));
     assert!(!html.contains("<p>```mermaid</p>"));
     assert!(!html.contains("<p>```</p>"));
+
+    Ok(())
+}
+
+#[test]
+fn markdown_mermaid_labels_with_punctuation_are_quoted() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.upsert_page(WikiPage::new(
+        "ha3/search/query-executors",
+        "Query Executors",
+        PageKind::Article,
+    ))?;
+    store.patch_page(
+        "ha3/search/query-executors",
+        ContentFormat::Markdown,
+        "```mermaid\nflowchart TD\n  Q[common::Query accept(visitor)] --> V[QueryExecutorCreator visit*]\n  V --> T[Term/Number/Phrase visitors]\n  T --> Out[_queryExecutor]\n```",
+        PatchMode::Replace,
+    )?;
+
+    let html = std::fs::read_to_string(temp.path().join("pages/ha3/search/query-executors.html"))?;
+    assert!(html.contains("Q[&quot;common::Query accept(visitor)&quot;]"));
+    assert!(html.contains("V[&quot;QueryExecutorCreator visit*&quot;]"));
+    assert!(html.contains("T[&quot;Term/Number/Phrase visitors&quot;]"));
+    assert!(html.contains("Out[&quot;_queryExecutor&quot;]"));
 
     Ok(())
 }
@@ -378,9 +410,9 @@ fn updating_outline_task_status_refreshes_private_note_task_state() -> anyhow::R
     let temp = tempfile::tempdir()?;
     let store = WikiStore::open(temp.path())?;
 
-    store.apply_outline(gitnova_wiki::WikiOutline {
+    store.apply_outline(WikiOutline {
         root: "ha3".to_string(),
-        pages: vec![gitnova_wiki::OutlinePage {
+        pages: vec![OutlinePage {
             id: "ha3/search/query-executors".to_string(),
             title: "Query Executors".to_string(),
             kind: PageKind::Article,
@@ -388,13 +420,16 @@ fn updating_outline_task_status_refreshes_private_note_task_state() -> anyhow::R
             parent: None,
             purpose: Some("Explain executor creation.".to_string()),
             content: None,
-            deep_tasks: vec![gitnova_wiki::DeepTask {
+            deep_tasks: vec![DeepTask {
                 id: "trace-query-executor-creator".to_string(),
                 question: "Trace QueryExecutorCreator.".to_string(),
                 scope_paths: vec![],
                 scope_symbols: vec![],
                 expected_outputs: vec![],
-                status: gitnova_wiki::TaskStatus::Pending,
+                max_nodes: None,
+                max_depth: None,
+                timeout_secs: None,
+                status: TaskStatus::Pending,
                 confidence: None,
                 error: None,
             }],
@@ -408,7 +443,7 @@ fn updating_outline_task_status_refreshes_private_note_task_state() -> anyhow::R
     store.update_task_status(
         "ha3/search/query-executors",
         "trace-query-executor-creator",
-        gitnova_wiki::TaskStatus::Done,
+        TaskStatus::Done,
         Some(0.91),
         None,
     )?;
@@ -416,6 +451,65 @@ fn updating_outline_task_status_refreshes_private_note_task_state() -> anyhow::R
     let done_note = store.read_private_note("ha3/search/query-executors")?;
     assert!(done_note.contains("- [done] trace-query-executor-creator"));
     assert!(!done_note.contains("- [pending] trace-query-executor-creator"));
+
+    Ok(())
+}
+
+#[test]
+fn retryable_tasks_can_include_failed_outline_tasks() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = WikiStore::open(temp.path())?;
+
+    store.apply_outline(WikiOutline {
+        root: "havenask".to_string(),
+        pages: vec![OutlinePage {
+            id: "havenask/ha3".to_string(),
+            title: "HA3".to_string(),
+            kind: PageKind::Index,
+            summary: None,
+            parent: Some("havenask".to_string()),
+            purpose: None,
+            content: None,
+            deep_tasks: vec![
+                DeepTask {
+                    id: "map-ha3".to_string(),
+                    question: "Map HA3.".to_string(),
+                    scope_paths: vec![],
+                    scope_symbols: vec![],
+                    expected_outputs: vec![],
+                    max_nodes: None,
+                    max_depth: None,
+                    timeout_secs: None,
+                    status: TaskStatus::Failed,
+                    confidence: None,
+                    error: Some("temporary limit".to_string()),
+                },
+                DeepTask {
+                    id: "map-query-parser".to_string(),
+                    question: "Map parser.".to_string(),
+                    scope_paths: vec![],
+                    scope_symbols: vec![],
+                    expected_outputs: vec![],
+                    max_nodes: None,
+                    max_depth: None,
+                    timeout_secs: None,
+                    status: TaskStatus::Pending,
+                    confidence: None,
+                    error: None,
+                },
+            ],
+        }],
+        version: 1,
+    })?;
+
+    let pending = store.pending_tasks("havenask", 10)?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1.id, "map-query-parser");
+
+    let retryable = store.retryable_tasks("havenask", 10)?;
+    assert_eq!(retryable.len(), 2);
+    assert_eq!(retryable[0].1.id, "map-ha3");
+    assert_eq!(retryable[1].1.id, "map-query-parser");
 
     Ok(())
 }

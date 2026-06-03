@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 mod code_agent;
 
 pub use code_agent::{
-    investigate_many, CodexCliAgent, InvestigationBudget, InvestigationDiagram,
-    InvestigationResult, InvestigationScope, InvestigationSource, InvestigationTask,
+    investigate_many, investigate_many_outcomes, CodexCliAgent, InvestigationBudget,
+    InvestigationDiagram, InvestigationOutcome, InvestigationResult, InvestigationScope,
+    InvestigationSource, InvestigationTask,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,7 +301,7 @@ fn select_entrypoints<'a>(
         .iter()
         .filter(|node| is_entry_candidate(node))
         .filter(|node| {
-            entry_lower.as_ref().map_or(true, |entry| {
+            entry_lower.as_ref().is_none_or(|entry| {
                 let haystack = format!("{} {} {}", node.name, node.qualified_name, node.path)
                     .to_ascii_lowercase();
                 haystack.contains(entry)

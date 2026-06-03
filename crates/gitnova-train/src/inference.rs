@@ -7,6 +7,7 @@ use candle_core::{Device, Tensor};
 use gitnova_core::model::{CodeGraph, NodeKind};
 use std::collections::{HashMap, HashSet};
 
+#[allow(clippy::too_many_arguments)]
 pub fn seed_expand_retrieve(
     model: &GraphTransformerModel,
     graph: &CodeGraph,
@@ -197,17 +198,11 @@ fn build_feature_tensor(
     for &gi in node_indices {
         match node_embeddings.get(&graph.nodes[gi].id) {
             Some(emb) => {
-                for &v in emb.iter().take(dim) {
-                    data.push(v);
-                }
-                for _ in emb.len()..dim {
-                    data.push(0.0);
-                }
+                data.extend(emb.iter().take(dim).copied());
+                data.extend(std::iter::repeat_n(0.0, dim.saturating_sub(emb.len())));
             }
             None => {
-                for _ in 0..dim {
-                    data.push(0.0);
-                }
+                data.extend(std::iter::repeat_n(0.0, dim));
             }
         }
     }

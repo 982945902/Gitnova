@@ -7,7 +7,7 @@
 - **Gitnova 版本**: 0.1.0 (release build)
 - **索引命令**: `gitnova index /Users/lishuo121/workspace/havenask --force`
 
-## 2. 基础统计 (V9 最新)
+## 2. 基础统计 (V9 最新正常版本)
 
 | 指标 | V9 数值 | V1 原始 | 变化 |
 |------|---------|---------|------|
@@ -101,28 +101,28 @@
 
 ### 4.1 综合评分
 
-| 维度 | V1 | V3 | V4 | V5 | V6 | V7 | V8 | V9 |
-|------|-----|-----|-----|-----|-----|-----|-----|-----|
-| 解析覆盖率 | 4 | 4 | 4 | 5 | 5 | 5 | 5 | **5** |
-| 符号解析准确性 | 2.5 | 4 | 4 | 3 | 4.5 | 4.5 | 4.5 | **4.5** |
-| 关系建模完整性 | 3 | 3 | 4 | 4 | 4 | 4.5 | 4.5 | **4.5** |
-| 搜索排序质量 | 3.5 | 4 | 4 | 3 | 4 | 4 | 4 | **4** |
-| 大规模项目可用性 | 4 | 4.5 | 4.5 | 4 | 4.5 | 4.5 | 4.5 | **4.5** |
-| **综合** | **3.2** | **3.9** | **4.1** | **3.8** | **4.4** | **4.5** | **4.6** | **4.6** |
+| 维度 | V1 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 |
+|------|-----|-----|-----|-----|-----|-----|-----|-----|------|
+| 解析覆盖率 | 4 | 4 | 4 | 5 | 5 | 5 | 5 | 5 | **5** |
+| 符号解析准确性 | 2.5 | 4 | 4 | 3 | 4.5 | 4.5 | 4.5 | 4.5 | **2** |
+| 关系建模完整性 | 3 | 3 | 4 | 4 | 4 | 4.5 | 4.5 | 4.5 | **0** |
+| 搜索排序质量 | 3.5 | 4 | 4 | 3 | 4 | 4 | 4 | 4 | **1.5** |
+| 大规模项目可用性 | 4 | 4.5 | 4.5 | 4 | 4.5 | 4.5 | 4.5 | 4.5 | **1** |
+| **综合** | **3.2** | **3.9** | **4.1** | **3.8** | **4.4** | **4.5** | **4.6** | **4.6** | **~1.5** |
 
 ### 4.2 关键指标演进
 
-| 指标 | V1 | V3 | V4 | V5 | V6 | V7 | V8 | V9 |
-|------|-----|-----|-----|-----|-----|-----|-----|-----|
-| 总节点 | 261,803 | 231,374 | 215,727 | 339,958 | 244,114 | 229,298 | 242,305 | 242,305 |
-| function | 52,682 | 3,869 | 3,858 | 8,289 | 3,596 | 2,399 | 3,428 | 3,428 |
-| method | 26,935 | 73,857 | 73,637 | 62,816 | 67,422 | 64,615 | 66,819 | 66,819 |
-| class | 25,714 | 15,704 | 15,095 | 14,958 | 14,958 | 8,435 | 14,294 | 14,294 |
-| module | 41,121 | 25,102 | 10,351 | 2,271 | 2,271 | 486 | 2,008 | 2,008 |
-| extends 边 | 0 | 0 | 2,185 | 3,028 | 3,028 | 3,008 | 3,031 | 3,036 |
-| extends→class | 0 | 0 | 1,484 | 1,451 | 1,451 | 1,193 | 2,029 | **2,085** |
-| extends→class 占比 | 0 | 0 | 68% | 48% | 48% | 40% | 67% | **69%** |
-| 节点类型数 | 7 | 7 | 7 | 12 | 12 | 12 | 12 | 12 |
+| 指标 | V1 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 |
+|------|-----|-----|-----|-----|-----|-----|-----|-----|------|
+| 总节点 | 261,803 | 231,374 | 215,727 | 339,958 | 244,114 | 229,298 | 242,305 | 242,305 | 17,630 |
+| function | 52,682 | 3,869 | 3,858 | 8,289 | 3,596 | 2,399 | 3,428 | 3,428 | — |
+| method | 26,935 | 73,857 | 73,637 | 62,816 | 67,422 | 64,615 | 66,819 | 66,819 | — |
+| class | 25,714 | 15,704 | 15,095 | 14,958 | 14,958 | 8,435 | 14,294 | 14,294 | — |
+| module | 41,121 | 25,102 | 10,351 | 2,271 | 2,271 | 486 | 2,008 | 2,008 | — |
+| extends 边 | 0 | 0 | 2,185 | 3,028 | 3,028 | 3,008 | 3,031 | 3,036 | **0** |
+| extends→class | 0 | 0 | 1,484 | 1,451 | 1,451 | 1,193 | 2,029 | 2,085 | **0** |
+| extends→class 占比 | 0 | 0 | 68% | 48% | 48% | 40% | 67% | 69% | **0%** |
+| 节点类型数 | 7 | 7 | 7 | 12 | 12 | 12 | 12 | 12 | — |
 
 ### 4.3 各版本 commit
 
@@ -137,20 +137,74 @@
 | V7 | `7727455`+`e1fa594`+`952f0e9` | namespace 去重 + extends 精度 + hub 惩罚 + class fallback |
 | V8 | `c9422d1` | fix: over-merging in namespace dedup，class 恢复到 14,294 |
 | V9 | `f5857b9` | fix: improve extends target selection and hub quality |
+| **V10** | `c973d5f` | **feat: SurrealStore full API replacing SQLite+Tantivy（严重回归）** |
 
 ### 4.4 关键版本里程碑
 
 - **V3 (+0.7)**: 修复 .cpp 方法归类 (function→method)，最大单次提升
-- **V5 (-0.3)**: variable 淹没 (128K) 导致回归，最大单次退步
+- **V5 (-0.3)**: variable 淹没 (128K) 导致回归，历史最大退步
 - **V7 (+0.1)**: namespace 去重生效，但 class 过度合并 (14,958→8,435)
 - **V8 (+0.1)**: 修复过度合并，class 恢复 14,294，extends→class 67%
 - **V9 (持平)**: extends→class 69%，边际改善，评分持平 4.6
+- **V10 (-3.1)**: SurrealStore 存储层迁移导致严重回归，评分 4.6→1.5
 
 ---
 
-## 5. 历史版本回归详情
+## 5. V10 版本回归详情 (SurrealStore 替代 SQLite+Tantivy)
 
-### 5.1 V7 版本回归 (namespace dedup + extends precision + hub penalties + class fallback)
+commit: `c973d5f`（合并了 `5f21765` SurrealStore full API + `70aa6c7` RocksDB lock fix）
+
+### 5.1 数据完整性
+
+| 数据源 | 节点数 | 边数 | 文件数 |
+|--------|--------|------|--------|
+| index.json (extract 阶段导出) | 242,305 | 1,147,082 | 13,435 |
+| SurrealDB `load_graph` 读取 | **17,630** | **0** | **759** |
+| 差异 | **-92.7%** | **-100%** | **-94.4%** |
+
+**结论**: 提取阶段数据完整（index.json 与 V9 一致），但 SurrealStore 的 `load_graph` 存在严重数据丢失：
+- 节点仅加载 7.3% (17,630/242,305)
+- 边完全丢失 (0/1,147,082)
+- 文件仅识别 759/13,435
+
+### 5.2 搜索质量退步
+
+| 查询 | V9 Top-1 (score) | V10 Top-1 (score) | 评价 |
+|------|-------------------|-------------------|------|
+| "inverted index build" | BuildingDateIndexReader (0.841) | SortDocumentContainer::swap (0.776) | **不相关** |
+| "search query term posting" | SpatialTermQueryExecutor::reset (0.836) | build_service::y (0.406) | **严重退步** |
+| "hash table lookup" | HashTablePrimaryKeyDiskIndexer::Lookup (0.828) | ELuna::LuaTable::has (0.503) | **严重退步** |
+
+### 5.3 性能退步
+
+| 指标 | V9 (SQLite) | V10 (SurrealDB) | 变化 |
+|------|------------|-----------------|------|
+| 索引耗时 | ~8min | ~12min | +50% |
+| `graph-context` 响应 | 正常 | **超时未返回** | 不可用 |
+| SurrealDB 数据库大小 | — | 1.8GB | — |
+
+### 5.4 根因分析
+
+1. **`save_graph` 逐条写入**: 24 万节点和 114 万边逐条 CREATE/RELATE，SurrealDB 单条写入极慢
+2. **`load_graph` 查询丢失**: `SELECT ... FROM symbol` 仅返回 17,630 行，可能是：
+   - SurrealDB 内部分页/流式读取未正确处理
+   - 逐条 CREATE 时大量写入失败（但未报错）
+   - RELATE 语句因源/目标节点不存在而静默失败，导致边全部丢失
+3. **读取性能极差**: `load_graph` 需加载 24 万节点到内存，SurrealDB 的 Rust SDK 响应极慢
+
+### 5.5 修复方向
+
+1. **P0: 修复 `load_graph` 数据丢失** — 确认 SurrealDB 中实际存储的节点/边数量
+2. **P0: 改 `save_graph` 批量写入** — 使用 SurrealDB 批量 INSERT 代替逐条 CREATE
+3. **P0: 修复 RELATE 失败** — 先确保所有节点写入后再写入边，检查 RELATE 是否静默失败
+4. **P1: 优化读取性能** — 考虑分页加载或从 index.json fallback 加载
+5. **P1: 考虑 JSON fallback** — 在 `load_graph` 中，当 SurrealDB 数据不完整时，回退到从 index.json 加载
+
+---
+
+## 6. 历史版本回归详情
+
+### 6.1 V7 版本回归 (namespace dedup + extends precision + hub penalties + class fallback)
 
 **数据对比 (V6→V7)**
 
@@ -170,7 +224,7 @@
 
 **问题**: class 过度合并 (14,958→8,435)，`InvertedIndexSearchTracer` 消失 → V8 修复
 
-### 5.2 V8 版本回归 (fix: over-merging in namespace dedup)
+### 6.2 V8 版本回归 (fix: over-merging in namespace dedup)
 
 **数据对比 (V7→V8)**
 
@@ -185,7 +239,7 @@
 
 **关键改进**: 修复 namespace 去重过度合并，class 恢复到合理水平，extends→class 占比大幅提升
 
-### 5.3 V9 版本回归 (fix: improve extends target selection and hub quality)
+### 6.3 V9 版本回归 (fix: improve extends target selection and hub quality)
 
 commit: `f5857b9`
 
@@ -200,7 +254,37 @@ extends→class 占比从 67%→69%，extends→struct 更精确 (106→54)。�
 
 ---
 
-## 6. 下一步开发优先级
+## 7. 下一步开发优先级
+
+### P0: 修复 SurrealStore 数据丢失 (V10 回归)
+
+**现状**: `load_graph` 仅加载 7.3% 节点、0% 边
+
+**修改文件**: `crates/gitnova-storage/src/surrealdb.rs`
+
+**方案**:
+1. 确认 `save_graph` 写入是否成功 — 查询 SurrealDB 中 `symbol` 表的实际行数
+2. 改逐条 CREATE 为批量 INSERT（SurrealDB 支持批量操作）
+3. RELATE 前确保源/目标节点已存在，处理静默失败
+4. 考虑 `load_graph` 增加 index.json fallback 机制
+
+**验证**:
+```bash
+gitnova stats --repo <repo>  # 节点应 > 240,000，边应 > 1,100,000
+```
+
+### P0: 修复 SurrealStore 读取性能
+
+**现状**: `graph-context` 超时未返回，加载 24 万节点极慢
+
+**修改文件**: `crates/gitnova-storage/src/surrealdb.rs`
+
+**方案**:
+1. `load_graph` 改为分页查询（LIMIT + OFFSET）
+2. 或直接从 index.json 加载，SurrealDB 仅用于 FTS 搜索
+3. 查询时只加载需要的子图，而非全量加载
+
+**验证**: `graph-context` 响应 < 5s
 
 ### P2: Namespace 嵌套层级去重 (InvertedIndexSearchTracer)
 
@@ -270,10 +354,12 @@ SELECT qualified_name FROM nodes WHERE name='InvertedIndexSearchTracer' AND kind
 
 ---
 
-## 7. 预期收益
+## 8. 预期收益
 
 | 修复项 | 预期评分提升 | 修复后评分 |
 |--------|------------|-----------|
+| P0: SurrealStore 数据丢失 | +3.0 | 4.5 (恢复到 V9 水平) |
+| P0: SurrealStore 读取性能 | +0.1 | 4.6 |
 | P2: Namespace 去重 | +0.2 | 4.8 |
 | P2: 索引性能 | +0.1 | 4.9 |
 | P3: extends 精度 | +0.1 | 5.0 |

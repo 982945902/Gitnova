@@ -172,8 +172,6 @@ pub fn utility_penalty(node: &Node, overlap: f64) -> f64 {
 
     let penalty: f64 = if is_generic_method && !generic_path {
         0.5
-    } else if is_generic_method && generic_path {
-        1.0
     } else {
         1.0
     };

@@ -192,7 +192,7 @@ pub fn build_graph_from_entries(root: impl AsRef<Path>, files: &[SourceFile]) ->
                                 Some(NodeKind::Struct) => 2,
                                 _ if graph
                                     .node(t)
-                                    .map_or(false, |n| n.qualified_name.contains("::")) =>
+                                    .is_some_and(|n| n.qualified_name.contains("::")) =>
                                 {
                                     1
                                 }

@@ -78,6 +78,23 @@ impl WikiStore {
         root_page_id: &str,
         limit: usize,
     ) -> Result<Vec<(String, DeepTask)>> {
+        self.expandable_tasks(root_page_id, limit, false)
+    }
+
+    pub fn retryable_tasks(
+        &self,
+        root_page_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, DeepTask)>> {
+        self.expandable_tasks(root_page_id, limit, true)
+    }
+
+    fn expandable_tasks(
+        &self,
+        root_page_id: &str,
+        limit: usize,
+        retry_failed: bool,
+    ) -> Result<Vec<(String, DeepTask)>> {
         let outline = self.read_outline()?;
         let mut tasks = Vec::new();
         for page in outline.pages {
@@ -85,7 +102,9 @@ impl WikiStore {
                 continue;
             }
             for task in page.deep_tasks {
-                if task.status == TaskStatus::Pending {
+                if task.status == TaskStatus::Pending
+                    || (retry_failed && task.status == TaskStatus::Failed)
+                {
                     tasks.push((page.id.clone(), task));
                     if tasks.len() >= limit {
                         return Ok(tasks);
@@ -643,6 +662,12 @@ fn source_span_href(from_page_ref: &str, evidence: &Evidence) -> Option<String> 
     if let Some(start_line) = evidence.start_line {
         href.push_str("#L");
         href.push_str(&start_line.to_string());
+        if let Some(end_line) = evidence.end_line {
+            if end_line != start_line {
+                href.push_str("-L");
+                href.push_str(&end_line.to_string());
+            }
+        }
     }
     Some(href)
 }
@@ -700,6 +725,7 @@ code { display: table; width: 100%; border-collapse: collapse; }
 .line-no { width: 1%; padding: 0 12px; color: var(--muted); text-align: right; border-right: 1px solid #edf0f4; user-select: none; }
 .line-code { padding: 0 14px; }
 .source-line:target .line-no, .source-line:target .line-code { background: var(--target); }
+.source-line.selected .line-no, .source-line.selected .line-code { background: var(--target); }
 </style>"#,
     );
     html.push_str("</head><body><main>");
@@ -713,7 +739,25 @@ code { display: table; width: 100%; border-collapse: collapse; }
             escape_html(line)
         ));
     }
-    html.push_str("</code></pre></main></body></html>");
+    html.push_str(
+        r#"</code></pre></main><script>
+function highlightHashSpan() {
+  document.querySelectorAll(".source-line.selected").forEach((line) => line.classList.remove("selected"));
+  const match = location.hash.match(/^#L(\d+)(?:-L?(\d+))?$/);
+  if (!match) return;
+  const start = Number(match[1]);
+  const end = Number(match[2] || match[1]);
+  const min = Math.min(start, end);
+  const max = Math.max(start, end);
+  for (let line = min; line <= max; line += 1) {
+    document.getElementById(`L${line}`)?.classList.add("selected");
+  }
+  document.getElementById(`L${min}`)?.scrollIntoView({ block: "center" });
+}
+window.addEventListener("hashchange", highlightHashSpan);
+highlightHashSpan();
+</script></body></html>"#,
+    );
     html
 }
 
@@ -813,9 +857,7 @@ fn relative_href(from_page_ref: &str, to_page_ref: &str) -> String {
     }
 
     let mut parts = Vec::new();
-    for _ in shared..from_dir.len() {
-        parts.push("..");
-    }
+    parts.extend(std::iter::repeat_n("..", from_dir.len() - shared));
     parts.extend(to_parts[shared..].iter().copied());
     if parts.is_empty() {
         ".".to_owned()
@@ -954,7 +996,7 @@ fn render_diagram_block(format: &str, diagram: &str) -> String {
         "svg" => format!("<div class=\"diagram-block\">{diagram}</div>"),
         "mermaid" => format!(
             "<div class=\"diagram-block\" data-diagram-format=\"mermaid\"><pre class=\"mermaid\">{}</pre></div>",
-            escape_html(diagram)
+            escape_html(&sanitize_mermaid_labels(diagram))
         ),
         _ => format!(
             "<pre><code>{}\n{}</code></pre>",
@@ -962,6 +1004,40 @@ fn render_diagram_block(format: &str, diagram: &str) -> String {
             escape_html(diagram)
         ),
     }
+}
+
+fn sanitize_mermaid_labels(diagram: &str) -> String {
+    let mut output = String::with_capacity(diagram.len());
+    for line in diagram.lines() {
+        output.push_str(&sanitize_mermaid_line_labels(line));
+        output.push('\n');
+    }
+    output.trim_end_matches('\n').to_string()
+}
+
+fn sanitize_mermaid_line_labels(line: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = line;
+    while let Some(open) = remaining.find('[') {
+        output.push_str(&remaining[..open + 1]);
+        let after_open = &remaining[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            output.push_str(after_open);
+            return output;
+        };
+        let label = &after_open[..close];
+        if label.starts_with('"') || label.starts_with('\'') || label.starts_with('`') {
+            output.push_str(label);
+        } else {
+            output.push('"');
+            output.push_str(&label.replace('"', "\\\""));
+            output.push('"');
+        }
+        output.push(']');
+        remaining = &after_open[close + 1..];
+    }
+    output.push_str(remaining);
+    output
 }
 
 fn page_uses_mermaid(format: ContentFormat, content: &str) -> bool {
