@@ -1,3 +1,11 @@
+<p align="center">
+  <img
+    src="docs/assets/gitnova-readme-hero.png"
+    alt="Gitnova - Local-first MCP code intelligence"
+    width="100%"
+  />
+</p>
+
 # Gitnova
 
 Gitnova is a local-first MCP code intelligence system for Rust, TypeScript,
